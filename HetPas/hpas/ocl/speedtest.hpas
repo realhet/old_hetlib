@@ -1,0 +1,127 @@
+//speed test
+#define groupsize 256
+
+const code:=asm_isa(
+  isa79xx
+  numVgprs 64  numSgprs 105  //used registers
+  numThreadPerGroup groupsize
+  oclBuffers 1,1            //first value is number of UAVs,
+                            //second value is number of const buffers(1 max)
+                            //you can check userElements and user_sgpr in the disassembled code
+                            //for 1,1 it is:
+                            ;  userElements[0]      = IMM_UAV, 10, s[4:7]
+                            ;  userElements[1]      = IMM_CONST_BUFFER, 1, s[8:11]
+                            ;  userElements[2]      = IMM_CONST_BUFFER, 2, s[12:15]
+                            ;  COMPUTE_PGM_RSRC2:USER_SGPR      = 16
+
+  ldsSize 1024              //in bytes
+
+  alias uav=s[4:7], cb=s[12:15], uavofsaddr=s[8:11], uavofs=s0
+
+  s_mulk_i32    s16, groupsize           //scale ThreadgroupID with GroupSize
+  v_add_i32     v0, vcc, s16, v0         //v0: global threadId
+  s_buffer_load_dword  uavofs, uavofsaddr, 0x00  //s0: uav offset
+  s_waitcnt     lgkmcnt(0)               //wait for s_buffer_loads
+
+  s_mov_b32 s20,$FFFFFFFF //minimum ticks       //ruins cb0 res const
+  s_mov_b32 s21,156      //iteration count     //ruins cb0 res const
+  @loop:
+    s_memtime s[16:17]   //ruins kernel params
+    s_waitcnt lgkmcnt(0)
+;--------- test code begin ----------------------------
+
+{this example shows that if you use an s_ instruction
+after a v_ instruction that writes S regs, it vill
+have +4 cycle latency}
+
+ #define pattern                  \
+  v_add_i32  v55, vcc, v55, v55   \
+  s_add_i32  s55, s55, s55
+
+//  v_mov_b32  v50, 0  ds_read_b32 v51, v50  //19
+//  v_and_b32 v50,255,v0  v_lshlrev_b32 v50,2,v50  ds_read_b32 v51, v50  //20
+  v_and_b32 v50,63,v0
+  v_lshlrev_b32 v50,2,v50
+  s_mov_b32 m0, 0x8000
+//  ds_read2_b32 v52, v50 offset0:0 offset1:128   //+8 cycle
+  ds_read_b32 v51, v50
+  ds_read_b32 v52, v50  offset:128
+  ds_read_b32 v53, v50  offset:28
+  v_movrels_b32 v5,v1
+  v_and_b32 v50,1,v0
+  v_and_b32 v50,1,v0
+  v_and_b32 v50,1,v0
+  v_and_b32 v50,1,v0
+  v_and_b32 v50,1,v0
+  v_and_b32 v50,1,v0
+  v_and_b32 v50,1,v0
+  v_and_b32 v50,1,v0
+  v_and_b32 v50,1,v0
+  s_waitcnt lgkmcnt(0)
+  v_and_b32 v50,1,v0
+,
+//  v_and_b32 v50,63,v0  s_mov_b32 m0, 0  v_movrels_b32 v51, v50 //only 9!!!
+
+
+//__for__(i in [1..6],pattern) //60
+
+;--------- end of test code ---------------------------
+    s_memtime s[18:19]   //ruins kernel params
+    s_waitcnt lgkmcnt(0)
+    s_sub_u32 s18, s18, s16
+    s_min_u32 s20, s20, s18
+    s_sub_u32 s21,s21,1
+  s_cbranch_scc0 @loop
+
+  s_sub_i32 s20,s20,$1C //s_wait cost
+  s_lshr_b32 s20,s20,2  //1clk = 4cycles
+  v_mov_b32 v2, s20     //mintime
+  v_mov_b32 v1, uavofs  //addr
+  buffer_atomic_umin v2, v1, uav, 0 offen
+
+
+  v_mov_b32 v6,-1
+  v_lshrrev_b32 v6,0,v6
+
+  v_and_b32 v0, 63, v0
+  v_lshlrev_b32 v7, 2, v0
+  v_add_i32 v7, vcc, uavofs, v7
+  tbuffer_store_format_x  v6, v7, uav, 4 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT]
+  s_endpgm
+);
+
+/*var code:='__kernel void localpointer_rw(global int *in, constant int *out)
+{
+    int i, gx = get_global_id(0);   //gx goes from 0 to 63
+    local int buf[64],*pB;
+
+     buf[gx] = gx;            //assign 64 numbers to all buf[n] locations
+     pB = &buf[0];            //make a pointer
+     i = *(pB+(1+gx));       //ERROR! reads only when gx == 0 !!
+     in[gx] = i;
+}';*/
+
+var i,j,k,dev:=cl.devices[0];
+writeln(dev.dump);
+
+//compile kernel
+var kernel:=dev.NewKernel(code);
+writeln(kernel.ISACode);  //show disasm
+//kernel.dump('dump');
+
+var uav:=dev.NewBuffer('rw',$10000);
+uav.clear;
+uav.intVArray:=(0xFFFFFF);
+
+var cb:=dev.NewBuffer('r',$1000{in bytes});
+cb.intVArray:=(0);
+
+//run kernel
+var ev:=kernel.run(2048*16,uav,cb);
+ev.waitfor;
+writeln('elapsed: '&format('%.3f',ev.elapsedtime_sec*1000)&' ms');
+ev.free;
+
+//display results
+with uav do for i:=0 to 15 do
+  writeln(format('%6x: %.8x %10d %10f',i,Ints[i],Ints[i],Floats[i]));

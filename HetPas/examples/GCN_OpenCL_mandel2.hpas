@@ -1,0 +1,193 @@
+////////////////////////////////////////////////////////////
+//   SP Mandel2  macro tutorial                           //
+////////////////////////////////////////////////////////////
+
+var code:=asm_isa(
+  #include stdgcn.inc
+
+  isa79xx \ numVGprs 84 \ numSgprs 104 \ cb0size  128
+  oclbuffers 1,1  alias uav0=s[4:7], cb0=s[12:15], uavofs=s[8:11]
+
+s_temp_range 90..99
+v_temp_range 60..79
+
+  alias ThreadGroupId=s16, ThreadId=v0
+  v_mad_i32_i24 ThreadId, ThreadGroupId, 64, ThreadId
+
+  ; load parameters
+  s_buffer_load_dword  s100, uavofs, 0x00  //s100: uav offset
+  s_buffer_load_dwordx8 s32, CB0, 0x00
+  s_waitcnt lgkmcnt(0)
+  alias maxIter=s32, winWidth=s33, JobCnt=s34
+  alias CxBase=s36, CyBase=s37, Step=s38
+//  alias JobId=v6, X=v7, Y=v8, Y2=v9, Iter=v10, Cx=v11, Cy=v12, halfCy=v13
+  v_temp JobId, X, Y, Y2, Iter, Cx, Cy, halfCy
+//  alias XOld=v14, YOld=v15, IterOld=v16
+
+  v_temp t[5]   //5 temp registers. also can be used as: t0 .. t4
+
+  s_xor_b64 exec, exec, exec //Active threads: none at start
+  @JobLoop:
+    ; fetch new jobs if exec<>-1
+    s_not_b64 vcc, exec
+    s_if(scc1)
+      ; save exec
+      s_mov_b64   s[0:1], exec    //save active jobs
+      s_mov_b64   exec, vcc
+      ; get next jobs
+      v_mov_b32   t1, s100 ;address
+      v_mov_b32   t2, 1 ;increment
+      buffer_atomic_add  t2, t1, UAV0, 0 offen glc
+      s_waitcnt   vmcnt(0)
+      ; check JobCount
+      v_cmp_gt_i32  vcc, JobCnt, t2 \ s_mov_b64   exec, vcc
+      ; initialize new jobs
+      s_if(execnz)
+        v_mov_b32   JobId, t2
+        ; calculate window coordinates
+        v_cvt_f32_i32   t0, JobId
+        v_cvt_f32_i32   t1, winWidth
+        v_rcp_f32       t1, t1
+        v_mul_f32       t0, t1, t0
+        v_cvt_flr_i32_f32  Y, t0
+        v_mul_lo_u32    t0, winWidth, Y
+        v_sub_i32       X, vcc, JobId, t0
+        ; calc mandelbrot C
+        v_mov_b32       t0, Step
+        v_cvt_f32_i32   X, X
+        v_mad_f32       Cx, t0, X, CxBase
+        v_cvt_f32_i32   Y, Y
+        v_mad_f32       Cy, t0, Y, CyBase
+        v_mul_f32       halfCy, 0.5, Cy
+        ; clear variables
+        v_sub_i32       Iter, vcc, 0, maxIter vop3   ; Iter will be checked against overflow
+        v_mov_b32       X, 0
+        v_mov_b32       Y, 0
+        ;-------------------------------------------
+      _endif
+      s_or_b64    exec, exec, s[0:1]    ; combine new jobs with existing jobs
+      s_cbranch_execz @End              ; exit if nothing to do  (also _scc0 is ok)
+    _endif
+    ;------------------------------------ do the jobs here
+    s_repeat   //coarse search loop, 6x unroll: 4.37->2.71 ms, 61% speedup. 6x unroll is too much for single precision
+      //save starting position
+      v_temp XOld, YOld, IterOld
+      v_mov_b32   XOld, X
+      v_mov_b32   YOld, Y
+      v_mov_b32   IterOld, Iter
+      ; Y and Y2 alternates across 2 iterations
+
+      #macro mandel(X,Y,YNew)
+        v_mul_f32   t0, X, X
+        v_mad_f32   YNew, X, Y, halfCy mul:2  { yn=2xy+Cy}
+        v_mad_f32   X, Y, Y, -t0
+        v_add_f32   X, -X, Cx                 { xn=x^2-y^2+Cx}
+      #endm
+
+      mandel(X,Y,Y2)  mandel(X,Y2,Y)
+      mandel(X,Y,Y2)  mandel(X,Y2,Y)
+      mandel(X,Y,Y2)  mandel(X,Y2,Y)
+
+      v_mad_f32   t0, Y2, Y2, t0                ; magn=x^2+y^2
+      v_cmp_le_f32 s[0:1], 4.0, t0              ; bailout test
+      v_add_i32   Iter, vcc, 6, Iter            ; check maximum iterations too
+      s_or_b64    vcc, vcc, s[0:1]              ; vcc: finished bits
+    s_until(vccnz)                              ; loop until we have a finished job
+
+    //restore starting position
+    v_mov_b32   X, XOld
+    v_mov_b32   Y, YOld
+    v_mov_b32   Iter, IterOld
+
+    s_repeat   //precise search loop
+      v_mul_f32   t0, X, X
+      v_mul_f32   t1, Y, Y
+      v_mad_f32   Y, X, Y, halfCy mul:2         ; yn=2xy+Cy
+      v_sub_f32   X, t0, t1
+      v_add_f32   X, X, Cx                      ; xn=x^2-y^2+Cx
+
+      v_add_f32   t0, t0, t1                    ; magnitude=x^2+y^2
+      v_cmp_le_f32 s[0:1], 4.0, t0              ; bailout test
+      v_add_i32   Iter, vcc, 1, Iter            ; check maximum iterations too
+      s_or_b64    vcc, vcc, s[0:1]              ; vcc: true where finished
+    s_until(vccnz)                              ; loop until we have a finished job
+
+    ;------------------------------------ some jobs are finished: bits set in vcc
+    s_andn2_b64 s[0:1], exec, vcc               ; s0: exec mask after finishing some jobs
+    s_mov_b64 exec, vcc                         ; exec: finished jobs
+    ;------------------------------------ write the result
+    v_add_i32 Iter, vcc, maxIter, Iter          ; correction
+
+    v_mul_f32   t0, X, X
+    v_mad_f32   t0, Y, Y, t0
+    v_log_f32   t0, t0
+    v_log_f32   t0, t0
+    v_sub_f32   t0, 1.0, t0                     ;smooth coloring:  1-log2(log2((xx*xx+yy*yy)))
+
+    v_cvt_f32_u32 t1, Iter
+    v_add_f32     t0, t0, t1                    ;t0: smooth iteration count
+
+    v_mov_b32 t2, 128.0
+    v_mul_f32 t1, 0.0112164, t0 \ v_sin_f32 t1, t1 \ v_mad_f32 t1, t1, t2, t2 \ v_cvt_pk_u8_f32 t4, t1, 0, 0
+    v_mul_f32 t1, 0.0153564, t0 \ v_sin_f32 t1, t1 \ v_mad_f32 t1, t1, t2, t2 \ v_cvt_pk_u8_f32 t4, t1, 1, t4
+    v_mul_f32 t1, 0.0191842, t0 \ v_sin_f32 t1, t1 \ v_mad_f32 t1, t1, t2, t2 \ v_cvt_pk_u8_f32 t4, t1, 2, t4
+
+    v_mad_i32_i24 t0, JobId, 4, 16              ; address calc
+    v_add_i32 t0, vcc, s100, t0
+    tbuffer_store_format_x  t4, t0, UAV0, 0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT]
+
+    s_mov_b64 exec, s[0:1]                    ; set the updated exec mask
+  s_branch @JobLoop
+  @End:
+  s_endpgm
+);
+
+function FindGCNDevice;
+begin
+  for var d in cl.devices where d.Info.TargetSeries>=7 do exit(d);
+  raise exception.create("No GCN device found");
+end;
+
+procedure Test;
+const
+  W:=800, H:=800; //window size
+
+begin
+  //selecting a GCN device
+  var dev:=FindGCNDevice; writeln(dev.dump);
+
+  //compile kernel
+  var kernel:=dev.NewKernel(code); //writeln(kernel.ISACode); exit;
+
+  //specify input data
+  with var rCB0:=dev.NewBuffer('r',4096{in bytes})do begin
+    Ints[0]:=1e5;      //max Iterations
+    Ints[1]:=W;        //window_width
+    Ints[2]:=W*H;      //Job count
+    Floats[4]:=-0.13856524454488;  //centerx
+    Floats[5]:=-0.64935990748190;  //centery
+    Floats[6]:=0.001;    //pixel size
+    Floats[4]-=Floats[6]*W/2;  //calculate TopLeft coords
+    Floats[5]-=Floats[6]*H/2;  //from Center coords
+  end;
+
+  //alloc global memory: 16bytes plus image size
+  var rGlobal:=dev.NewBuffer('rw',16+w*h*4{in bytes});
+  rGlobal.Ints[0]:=0;  //this int points the current job id (pixel position)
+
+  with Kernel.Run(2048*4*3,rglobal,rcb0) do begin
+    if Success then DisplayBitmap(rGlobal.ExportBitmap(16,W,H,32))
+               else WriteLn('FAIL');
+
+    WriteLn('elapsed time:',ElapsedTime_sec);
+    Free;//the event
+  end;
+
+  //cleanup
+  Kernel.free;
+  rCB0.free;
+  rGlobal.free;
+end;
+
+
+Test;

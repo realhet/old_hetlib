@@ -1,0 +1,58 @@
+var kernel:=asm_isa(        ;na igy aze kulturaltabb egy fokkal
+  isa79xx
+  NumVgprs     64
+  NumSgprs    105       ;comment2 grewiqgew
+  cb0size       2
+
+  s_buffer_load_dwordx16  s[32:47], s[8:11], 0x00
+  s_waitcnt     lgkmcnt(0)
+);
+
+writeln(kernel+'[end]');
+
+for var i in[23..31,69..127]do kernel+=
+'VOP3_invalid_'&i&'  v1, 23 vop3
+v_mov_b32 v0, '&i*4&'
+tbuffer_store_format_x  v1, v0, s[4:7], 0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT]
+';
+
+for var i in[50..63]do kernel+=
+'VOP3_invalid_'&i&'  v1, 23, 12
+v_mov_b32 v0, '&i*4&'
+tbuffer_store_format_x  v1, v0, s[4:7], 0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT]
+';
+
+for var i in[373..383]do kernel+=
+'VOP3_invalid_'&i&'  v1, 23, 12, 53
+v_mov_b32 v0, '&i*4&'
+tbuffer_store_format_x  v1, v0, s[4:7], 0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT]
+';
+
+
+//results: VOP1: all 0    VOP2: all 0    VOP3
+
+kernel+='s_endpgm';
+
+var dev:=cal.devices[0];
+
+var module:=dev.Context.NewModule(kernel);
+writeln(module.disasm);
+
+var rCB0:=dev.NewResource(rlPinned,4,64,0);
+module['cb0']:=rCB0;
+rCB0.IntVArray:=(101,102,103,104,105,106,107,108);
+
+var rGlobal:=dev.NewResource(rlPinned,1,4*12500,0);
+module['uav0']:=rGlobal;
+
+for i:=0 to 512 do rGlobal.Ints[i]:=-1;
+
+const ReferenceTime:=1.9198;
+
+for i:=0 to 1 do with Module.RunGrid(1,1,0) do begin
+  if Success then for var i:=0 to 512 do writeln(format('%3d %.8x %10d %8.4f',i,rGlobal.Ints[i],rGlobal.Ints[i],rGlobal.Floats[i]),' ')
+             else writeLn('FAIL');
+
+  writeln(format('elapsed:%.5f ratio:%.2f%%',ElapsedTime_sec,(ReferenceTime/ElapsedTime_sec)*100-100));
+  Free;
+end;

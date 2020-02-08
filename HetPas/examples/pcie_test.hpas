@@ -1,0 +1,38 @@
+//find a cl device
+var dev:=cl.devices[1];
+writeln(dev.dump);
+
+var code:='
+__kernel __attribute__((reqd_work_group_size(256,1,1)))
+void main(__global int* a)
+{
+  int g=get_global_id(0);
+  a[g]+=a[g];
+}';
+
+//compile kernel
+var kernel:=dev.NewKernel(code);
+//writeln(kernel.ILCode);   //show il disasm
+writeln(kernel.ISACode);  //show isa disasm
+kernel.dump('c:\!ocl_ocl\');  //save everything generated into the given path
+
+const WorkCount:=256;
+
+//allocate buffer
+var uav:=dev.NewBuffer('rw',16<<20);
+//uav.clear;
+uav.intVArray:=($7fffffff, -3 ,-2,-1,0,1,2,3);
+
+//run kernel
+using var ev:=kernel.run(WorkCount,uav) do begin
+  ev.waitfor;
+  writeln('elapsed: '&format('%.3f',ev.elapsedtime_sec*1000)&' ms');
+end;
+
+//display results
+with uav do for var i:=0 to WorkCount-1 do
+  writeln(format('%6x: %.8x %10d %10f',i,Ints[i],Ints[i],Floats[i]));
+
+//free up stuff
+uav.free;
+kernel.free;

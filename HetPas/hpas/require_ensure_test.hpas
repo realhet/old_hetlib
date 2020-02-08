@@ -1,0 +1,17 @@
+//require_ensure test
+
+function vasarol(ATermekNev,AMennyiseg);
+require
+  ATermekNev in ('alma','korte','barack');
+  0<=AMennyiseg<=100 //: 'mennyiseg out of range';
+begin
+  writeln('Vett '&AMennyiseg&' '&ATermekNev&'-t');
+ensure
+  true;
+  true;
+end;
+
+//vasarol('alma',4);
+
+var obj:=(name:'ojjektum1',size:5);
+writeln(obj.name,' ',obj.size);

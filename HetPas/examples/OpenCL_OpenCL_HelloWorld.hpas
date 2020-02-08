@@ -1,0 +1,46 @@
+//find a cl device
+var dev:=cl.devices[0];
+writeln(dev.dump);
+
+var code:='
+__kernel __attribute__((reqd_work_group_size(256,1,1)))
+void kernel1(__global int* a1, __constant int* cb)
+{
+  int g=get_global_id(0);
+  a1[g]+=cb[g];
+}';
+
+//compile kernel
+var kernel:=dev.NewKernel(code);
+//writeln(kernel.ILCode);   //show il disasm
+
+
+
+writeln(kernel.ISACode);  //show isa disasm
+//kernel.dump('c:\!ocl_ocl\');  //save everything generated into the given path
+filewrite('c:\!ocl_ocl\$test.elf',kernel.ELFImage); //save opencl .elf file, you can give it to NewKernel() later
+
+const WorkCount:=256;
+
+//allocate buffer
+var uav:=dev.NewBuffer('rw',WorkCount*4{in bytes});
+uav.clear;
+uav.intVArray:=($7fffffff, -3 ,-2,-1,0,1,2,3);
+
+var cb:=dev.NewBuffer('r',4096{in bytes});
+cb.intVArray:=(1,1,1,1,1,1,1,1,1,1,1,1,1);
+
+//run kernel
+var ev:=kernel.run(WorkCount,uav,cb);
+ev.waitfor;
+writeln('elapsed: '&format('%.3f',ev.elapsedtime_sec*1000)&' ms');
+ev.free;
+
+//display results
+with uav do for var i:=0 to WorkCount-1 do
+  writeln(format('%6x: %.8x %10d %10f',i,Ints[i],Ints[i],Floats[i]));
+
+//free up stuff
+cb.free;
+uav.free;
+kernel.free;

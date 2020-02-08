@@ -1,0 +1,122 @@
+//!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+//Important note for CAL
+//On hd7970  this needs the 11-12_amd_radeon_hd7900_win7_64 driver (or 12-2 on linux)
+//Otherwise the kernel will freeze
+
+const maxDepth:=20;
+
+var kernel:=asm_isa(
+  isa79xx \ numVGprs 64 \ numSgprs 105 \ cb0size  128 \ ldsSize 0
+  alias uav=s[4:7], cb=s[8:11]
+  alias codebase=s[12:13], Fibonacci=s[14:15], maxAddr=s16
+
+  s_getpc_b64   codebase
+  s_sub_u32     codebase, codebase, 4   //calc beginning of code addr
+
+  s_buffer_load_dword  maxAddr, cb, 0   //load constant buffer params
+  s_waitcnt     lgkmcnt(0)
+  s_lshl_b32    maxAddr, maxAddr, 2
+
+  s_add_u32     Fibonacci, codebase, @Fibonacci  //calc funct address
+  s_addc_u32    s19, s19, 0
+
+  s_movk_i32    exec_lo, 1
+  s_movk_i32    exec_hi, 0      //only 1 lane will write results
+  v_mov_b32     v0, 0           //dst array address
+  s_movk_i32    m0, 104         //init stack pointer
+
+  s_sub_u32 m0,m0,1 \ s_movreld_b32 s0, 1  //push 1st param
+  s_sub_u32 m0,m0,1 \ s_movreld_b32 s0, 1  //push 2nd param
+  s_swappc_b64 s[0:1],Fibonacci            //call Fibonacci(1,1)
+
+  s_endpgm
+
+@Fibonacci:
+  //entry code
+  s_sub_u32 m0, m0, 2 \ s_movreld_b64 s0, s0  //push return addr s[0:1]
+  s_movrels_b32 s0, s3  //get 1st param //s0=ret_addr
+  s_movrels_b32 s1, s2  //get 2nd param
+  //do fibonacci
+  s_add_i32     s2, s0, s1
+  //write the result
+  v_writelane_b32 v1,s2,0
+  tbuffer_store_format_x v1, v0, uav, 0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT]
+  v_add_i32     v0, vcc, 4, v0   //increment dst offset
+  v_cmp_le_u32  vcc, maxAddr, v0 //limit recursion
+  s_cbranch_vccnz @nomore
+    s_sub_u32 m0,m0,1 \ s_movreld_b32 s0, s1  //push 1st param
+    s_sub_u32 m0,m0,1 \ s_movreld_b32 s0, s2  //push 2nd param
+    s_swappc_b64 s[0:1], Fibonacci            //call recursive
+  @nomore:
+  s_movrels_b64 s0,s0 \ s_add_u32 m0,m0,2 //pop return addr
+  s_add_u32 m0,m0,2 //clear parameters
+  s_setpc_b64 s[0:1] //ret
+);
+
+var macrokernel:=asm_isa(
+  isa79xx \ numVGprs 64 \ numSgprs 105 \ cb0size  128 \ ldsSize 0
+  alias uav=s[4:7], cb=s[8:11]
+  alias codebase=s[12:13], maxAddr=s14
+
+  s_getpc_b64   codebase \ s_sub_u32     codebase, codebase, 4 //calc beginning of code addr
+
+  s_buffer_load_dword  maxAddr, cb, 0   //load constant buffer params
+  s_waitcnt     lgkmcnt(0)
+  s_lshl_b32    maxAddr, maxAddr, 2
+
+  s_movk_i32    exec_lo, 1
+  s_movk_i32    exec_hi, 0      //only 1 lane will write results
+  v_mov_b32     v0, 0           //dst array address
+  s_movk_i32    m0, 104         //init stack pointer
+
+  {#define push(x) s_sub_u32 m0,m0,1 \ s_movreld_b32 s0, x \}
+  {#define invoke(label) s_add_u32 s0, s12, label \ s_addc_u32 s1,s13,0 \ s_swappc_b64 s[0:1],s[0:1] \}
+  {#define invoke(label,p0) push(p0) invoke(label) \}
+  {#define invoke(label,p0,p1) push(p0) push(p1) invoke(label) \}
+  {#define enter s_sub_u32 m0, m0, 2 \ s_movreld_b64 s0, s0 \}
+  {#define enter(p0) enter s_movrels_b32 p0, s2 \}
+  {#define enter(p0,p1) enter s_movrels_b32 p0, s3 \ s_movrels_b32 p1, s2 }
+  {#define ret(n)   s_movrels_b64 s0,s0 \ s_add_u32 m0,m0,2 \ //pop return addr
+                    s_add_u32 m0,m0,n \ //clear parameters
+                    s_setpc_b64 s[0:1] \ //ret  \}
+
+  invoke(@Fibonacci,1,0)
+
+  s_endpgm
+
+@Fibonacci:
+  enter(s0,s1)
+  //do fibonacci
+  s_add_i32     s2, s0, s1
+  //write the result
+  v_writelane_b32 v1,s2,0
+  tbuffer_store_format_x v1, v0, uav, 0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT]
+  v_add_i32     v0, vcc, 4, v0   //increment dst offset
+  v_cmp_le_u32  vcc, maxAddr, v0 //limit recursion
+  s_cbranch_vccnz @nomore
+    invoke(@Fibonacci,s1,s2)
+  @nomore:
+  ret(2)
+);
+
+
+var dev:=cal.devices[0];
+dev.activate;
+//writeln(dev.dump);
+
+var module:=dev.Context.NewModule(macrokernel);
+//writeln(module.disasm);
+
+var rCB0:=dev.NewResource(rlPinned,4,64,0);
+module['cb0']:=rCB0;
+rCB0.IntVArray:=(maxDepth);
+
+var rGlobal:=dev.NewResource(rlPinned,1,maxDepth,0);
+module['uav0']:=rGlobal;
+
+with Module.RunGrid(1,1,0) do begin
+  if Success then for var i:=0 to MaxDepth-1 do writeln(format('%8d',rGlobal.Ints[i]),' ')
+             else writeLn('FAIL');
+  writeln('elapsed:',ElapsedTime_sec);
+  Free;
+end;

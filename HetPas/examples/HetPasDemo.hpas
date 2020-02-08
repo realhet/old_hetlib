@@ -1,0 +1,136 @@
+////////////////////////////////////////////////////////////////////////////////
+//  HetPas 1.0   Language Test/Demo program                                   //
+//                                                             real_het 2011  //
+////////////////////////////////////////////////////////////////////////////////
+
+// 1. Comments                                                                //
+
+//{ comment1 } (* Comment2 *) /* comment3 */ //comment4
+
+// 2. Constants
+writeln('Integer Constants        ',(123 ,-456));
+writeln('  in Hexadecimal         ',(0xFFF ,-$F));
+writeln('  in Binary              ',(-0b111 ,0b0010));
+writeln('Float Constants          ',(123.4 ,-456.7e-3));
+writeln('  in Hexadecimal "g"=exp ',(0xFF0g-1 ,-$0.8g0));
+writeln('  in Binary              ',(-0b11.110e-10 ,0b0010.1));
+writeln;
+writeln('Strings                  ',('in quotes'," or in double quotes"));
+writeln('  Literal quotes         ','''this is a quoted str''');
+write  ('  Special chars          ','this is a CRLF ->'#13#$A);
+write  ('  Hex Str Stream         ',#0x303132333435363738390D0A);
+writeln('  Multiline str is valid ','Line1
+Line2
+Line3');
+writeln('  This str is valid too  ','AB'    #67   "D"#0x45#$4647);
+writeln;
+writeln('Date, Time constants     ',(1987.12.31, 23:32:48.1234 ));
+writeln('  in simplified form     ',(  87.12.31, 23:32         ));
+writeln('  2digit year is in range 1951..2050',(51.1.1,50.1.1));
+writeln('  combine date and time with " " between them ',87.12.31 23:32);
+writeln('  Date,Time is stored in Delphi''s datetime format');
+writeln;
+writeln('Boolean constants        ',(true,false));
+writeln;
+writeln('Array constants');
+writeln('  Defined in ( )            ',(1,2,3,4,5));
+writeln('  Empty array               ',());
+writeln('  1 element arrays must call the array funct ',array('one element'));
+writeln('  Arrays can hold anything  ',(1,'two',(3.1/2,4,5),()));
+writeln('  Named Arrays              ',(Name:'FooBar',Age:40));
+writeln;
+writeln('Set constructs');
+writeln('  Defined in [ ]            ',['a','b','c','z']);
+writeln('  Intervals marked with ..  ',['a'..'c','z']);
+writeln('  Can hold anyting (unless it has intervals) ',[4/5,'hello',[1..8,11,9]]);
+
+// 3. Operators                                                               //
+writeln;writeln;writeln;var a:=2,b:=3,obj:=(Name:'FooBar',Age:40),n:=null;
+writeln('Prefix Operators');
+writeln('  plus, negate, not(32bit)  ',(+a, -a, not a, not false));
+writeln('  ++ -- inc, dec            ',(++a, --a));
+//new bug!!!! writeln('  @ ^ reference of, dereference(automatic) ',(@a, (@a)^));
+writeln('Postfix Operators');
+writeln('  ++ -- postinc,postdec     ',(a++, a--));
+writeln('  ! factorial               ',(a!, b!));
+writeln('Infix Operators (in precedence order)');
+writeln('  .  fieldOf (member)        ',(obj.Name, obj.Age));//works with: NamedArrays, TPersistent, IDispatch (numeric dispID''s too)
+//writeln('  Null safe field addess    ',n..field); //FUTURE
+writeln('  () invoke                  ',trunc(1.1));
+writeln('  [] indexing                ',obj.name[3]);
+writeln;
+writeln('  :  named var definition    ',Name:'FooBar');
+writeln;
+writeln('  ?? null coalescing         ',null??'left side was null');
+writeln('  !! zero coalescing         ',0!!'left side waz zero');
+writeln;
+writeln('  ** power                   ',2**7);
+writeln;
+writeln('  * / multiply,divide        ',(a*b,b/a));
+writeln('  div mod   for integers     ',(a div b,a mod b));
+writeln('  %  float modulo            ',(1.2%0.5));
+writeln('  and  (bool, 32bit)         ',(a and b, true and true));
+writeln('  >> << shr shl (uint32)     ',(a>>1, a<<1, a shr 1, a shl 1));
+writeln('  sar sal  (int32)           ',(-2 sar 1));
+writeln;
+writeln('  + - add,subtract           ',(a+b, a-b));
+writeln('  or xor  32bit              ',(a or b,a xor b, true or false, true xor true));
+writeln;
+writeln('  &  toStr+Concatenate       ',12&'hello'&1+2);
+writeln;
+writeln('  = <> < > <= >= relational  ',(a=b, a<>b, a>b, a>=b, 1<a<5));
+writeln;
+writeln('  like  wildcard check       ',('foobar.exe' like '*.exe'));
+writeln('  in  Set check              ',(5 in [1,3..8,0]));
+writeln;
+writeln('  :=  value assignment       ',(a:=3, a));
+writeln('  += -= *= /= %=  assign+op  ',(a*=2,a/=2));
+writeln;
+writeln('Extra operations');
+writeln('  And-ed relations           ',1<a<=5);
+writeln('  inverted "in"              ',a not in [1..5]);
+writeln('  inverted "like"            ','apple' not like 'b*');
+writeln('  string case insensitivity  ','apple'='Apple');
+writeln('  vector operators           ',((1,2)+4,(3,4,5)*(5,6,7)));
+writeln('  vector assignments         ',(a,null,b):=(3,5,2),(a,b));
+
+// 4. Statements                                                              //
+writeln;writeln;writeln;
+write('  Sequence block             ');
+begin write(1);write(2);write(3);end;writeln;
+//write('  With                       ');
+//with obj do begin write(Name);write(Age);end;writeln;
+write('  Conditional If             ');
+if true then writeln('true') else writeln('false');
+write('  Conditional Case             ');
+case 5 of
+  0:write('1');
+  5:write('2');
+end;
+writeln;
+write('  Loop: While do unless        ');
+var i:=0;while i++<10 do write(i);
+var i:=0;while i++<0 do write(i)unless write('unless');
+writeln;
+write('  Loop: repeat until           ');
+var i:=0;repeat write(i)until ++i>=10;
+writeln;
+write('  Loop: for in/to/downto/towards step where do unless ');
+for i:=10 towards 0 do write(i)unless write('unless');writeln;
+for i:=10 to      0 do write(i)unless write('unless');writeln;
+for i:=10 to 0 step -0.5 where frac(i)=0 do write(i)unless write('unless');writeln;
+for i in [0..10,20..30] where i and 1 do write(i);writeln;
+writeln;
+
+//array array results
+writeln('array result tests');
+writeln( (1,2,3)*(4,5,6)+100 );
+writeln( (1,2,3)>2 );
+//var a,b:='teszt',c,v:=(@a,@b,@c);
+{function f;begin result:=(5,6,7)end;
+var a,b,c,v;
+(a,b,c):=f;  writeln( (a,b,c), v );  //TODO: @dereference bugs in arrays}
+
+var i,j,k;
+(i,j,k)*10+(5,6,7) := 12;
+writeln(i,j,k);

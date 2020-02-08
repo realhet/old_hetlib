@@ -1,0 +1,146 @@
+#include stdgcn.inc
+#define DeviceId           1
+#define WorkGroupSize    256
+#define DebugGID          15
+
+#define numCU             10
+#assign numSegs   numCU*64*2    //number of streams*2 ideal for GWS
+#define segSize            3
+#assign numPoints numSegs*segSize
+#define pointBase          4    //base offset of point data
+#define pointRecSize       9
+
+var dev:=FindGCNDevice;  writeln(dev.dump);
+
+var skeleton:='__kernel __attribute__((reqd_work_group_size('&WorkGroupSize&',1,1))) void main(__global uint* a) { a[get_global_id(0)]=999; }',
+code:=asm_isa(
+  isa79xx
+  numthreadpergroup WorkGroupSize
+  ldssize 8192
+  numvgprs 64   v_temp_range  2..63
+  numsgprs 32   s_temp_range  8..31
+///////////////////////////////////////////////////////////////////////// KERNEL INIT ///
+  s_buffer_load_dword  s30, s[ 8:11], 0x18 ofsDWord //GID base
+  s_buffer_load_dword  s31, s[12:15], 0x00 ofsDWord //UAV base
+  s_or_b32      s5, s5, $40000                      //dw record size
+  s_mul_i32     s29, s16, WorkGroupSize
+  s_waitcnt     lgkmcnt(0)
+  s_add_u32     s29, s29, s30
+  s_add_u32     s4, s4, s31 \ s_addc_u32 s5 ,s5, 0  //s[4:7] = buffer
+  v_add_i32     v1, vcc, s29, v0
+  alias UAV=s[4:7], LID=v0, GID=v1
+/////////////////////////////////////////////////////////////////////////////////////////
+
+  v_temp px[segSize], py[segSize], pz[segSize] //act pos
+  v_temp lx[segSize], ly[segSize], lz[segSize] //last pos
+  v_temp im[segSize], sl[segSize], sk[segSize] //invmass, spring len, spring const
+  v_temp ax, ay, az, bx, by, bz, asl, ask      //acting as p[-1] and p[segSize]
+  v_temp fx, fy, fz   //force
+  v_temp t0, t1, t2   //universal temps
+
+//read/write data -----------------------------------------------------------------------
+  #define inc(value,increment) v_add_u32 value, vcc, (increment), value
+  #define inc(value) inc(value,1)
+  #define seekToData  v_mul_lo_u32 t0, pointRecSize*segSize, gid  inc(t0, pointBase)
+  #define loadField(res) v_read(res, t0) inc(t0)
+  #define saveField(res) v_write(res, t0) inc(t0)
+  #macro issueSegmentData(op)
+    seekToData
+    __for__(i:=0 to segSize-1,
+      op(px[i])  op(py[i])  op(pz[i])
+      op(lx[i])  op(ly[i])  op(lz[i])
+      op(im[i])  op(sl[i])  op(sk[i])
+    )
+  #endm
+  //main IO macroes
+  #define loadSegment issueSegmentData(loadField)
+  #define saveSegment issueSegmentData(saveField)
+
+  #macro loadExtra  //spring length, spring k from previous lane
+    seekToData
+    inc(t0,-pointRecSize+7) //seek to spring len     !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!BUG: A - jel, ha space van utana, akkor triggerelheti a VOP3-at nem modifierrel, ami az inline konstansra hatastalan.
+    loadField(asl)  loadField(ask)
+  #endm
+
+//data exchange ------------------------------------------------------------------------
+
+v_temp actLaneAddr, nextLaneAddr, prevLaneAddr    //byte offsets for accessing neighboring threads in LDS
+
+#define prepareLaneAddr(a, ofs) v_add_u32 a, vcc,  ofs, lid    v_and_b32 a, workGroupSize-1, a  v_lshlrev_b32 a, 2, a
+prepareLaneAddr(actLaneAddr ,  0)
+prepareLaneAddr(nextLaneAddr,  1)
+prepareLaneAddr(prevLaneAddr, -1)
+#assign laneBlockSize workGroupSize*4
+
+#macro LDSWrite(data, block, laneAddr)  //lane:act, next, prev
+  s_mov_b32 m0, $FFFF
+  v_add_u32 t0, vcc, block*laneBlockSize, laneAddr
+  ds_write_b32 t0, data
+  s_waitcnt lgkmcnt(0)
+#endm
+
+#macro LDSRead(data, block)
+  s_mov_b32 m0, $FFFF
+  v_add_u32 t0, vcc, block*laneBlockSize, actLaneAddr
+  ds_read_b32 data, t0
+  s_waitcnt lgkmcnt(0)
+#endm
+
+//math ---------------------------------------------------------------------------------
+
+#macro distance(p0x, p0y, p0z, p1x, p1y, p1z)
+  v_sub_f32 t0, p1x, p0x   v_mul_f32 t0, t0, t0
+  v_sub_f32 t1, p1y, p0y   v_mac_f32 t0, t1, t1
+  v_sub_f32 t2, p1z, p0z   v_mac_f32 t0, t2, t2
+  v_sqrt_f32 res, t0
+#endm
+
+#macro calcSpringForce
+#endm
+
+
+
+//main ---------------------------------------------------------------------------------
+  loadSegment loadExtra
+
+  //exchange neighbouring points
+  LDSWrite(px[0], 0, prevLaneAddr)
+  LDSWrite(px[segSize-1], 1, nextLaneAddr)
+  s_barrier
+  LDSRead(bx, 0)
+  LDSRead(ax, 1)
+
+  //test shift
+  v_mov_b32 px[0], px[1]  v_mov_b32 px[1], px[2]  v_mov_b32 px[2], bx
+  //v_mov_b32 px[2], px[1]  v_mov_b32 px[1], px[0]  v_mov_b32 px[0], ax
+
+  saveSegment
+
+  s_endpgm
+);
+//compile kernel
+
+var kernel:=dev.NewKernel(code, skeleton);
+//writeln(kernel.ISACode);
+
+const WorkCount:=numSegs;
+
+//allocate buffer
+var uav:=dev.NewBuffer('rw',(numPoints*pointRecSize+pointBase)*4{in bytes});
+
+//fill with test data
+for i:=0 to numPoints-1 do uav.floats[pointBase+pointRecSize*i+0]:=i+1;
+
+
+//run kernel
+using var ev:=kernel.run(WorkCount,uav)do begin
+  waitfor;
+  writeln('elapsed: '&format('%.3f', elapsedtime_sec*1000)&' ms');
+end;
+
+//display results
+with uav do for var i:=0 to WorkCount-1 do
+  writeln(format('%6x: %.8x %10d %10f',i,Ints[i],Ints[i],Floats[i]));
+
+//free up stuff
+uav.free; kernel.free;

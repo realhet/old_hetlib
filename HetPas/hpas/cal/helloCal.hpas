@@ -1,0 +1,162 @@
+const
+  HelloIL_cs:=
+'il_cs_2_0
+dcl_num_thread_per_group 64,1,1
+dcl_cb cb0[1]
+dcl_raw_uav_id(0)
+dcl_literal l1,0,16,0,5
+mov r2.x,l1.x
+uav_raw_load_id(0) r0.xyzw, r2.x
+iadd r0,r0,cb0[0]
+iadd r0,r0,vAbsTid.x
+iadd r0.x,r0.x,l1.w
+mov r2.x,l1.y
+uav_raw_store_id(0) mem, r2.x, r0
+end';
+
+const test:='
+il_cs_2_0
+dcl_num_thread_per_group 64,1,1
+dcl_raw_uav_id(0)
+dcl_cb cb0[48]
+;cb0[11]:=($3DCCCCCD,$3C23D70A,$3A83126F,$38D1B717);
+;cb0[12]:=($41200000,$41200000,$41200000,$41200000);
+;cb0[13]:=($3A51B717,$38A7C5AC,$1,$EFCDAB89);
+;cb0[14]:=($3E4CCCCD,$3D23D70A,$3C03126F,$2);
+;cb0[15]:=($40A00000,$40A00000,$40A00000,$5A827999);
+;cb0[16]:=($C3D2E1F0,$98BADCFE,$67452301,$1B);
+;cb0[17]:=($10325476,$100,$80000000,$C0);
+;cb0[18]:=($1F,$200,$400,$4);
+;cb0[19]:=($6ED9EBA1,$800,$8,$80000);
+;cb0[20]:=($C00,$C,$1000,$10);
+;cb0[21]:=($C0000,$2000,$20,$200000);
+;cb0[22]:=($3400,$34,$4000,$40);
+;cb0[23]:=($340000,$1800,$18,$180000);
+;cb0[24]:=($8C00,$8C,$8C0000,$D000);
+;cb0[25]:=($D0,$11000,$110,$D00000);
+;cb0[26]:=($10000,$20000,$1000000,$8F1BBCDC);
+;cb0[27]:=($2000000,$35000,$350,$40000);
+;cb0[28]:=($3500000,$18800,$188,$4000000);
+;cb0[29]:=($8D800,$8D8,$D2800,$D28);
+;cb0[30]:=($111000,$1110,$D280000,$43800);
+;cb0[31]:=($438,$105000,$1050,$4380000);
+;cb0[32]:=($201000,$2010,$10500000,$5000);
+;cb0[33]:=($50,$20100000,$359000,$3590);
+;cb0[34]:=($500000,$400000,$185000,$1850);
+;cb0[35]:=($40000000,$410000,$4100,$18500000);
+;cb0[36]:=($8DC000,$8DC0,$41000000,$100000);
+;cb0[37]:=($8DC00000,$D08000,$D080,$10000000);
+;cb0[38]:=($CA62C1D6,$1110000,$11100,$D0800000);
+;cb0[39]:=($40C000,$40C0,$11000001,$1010000);
+;cb0[40]:=($10100,$40C00000,$2008000,$20080);
+;cb0[41]:=($1000001,$800002,$351D000,$351D0);
+;cb0[42]:=($4010000,$40100,$51D00003,$1880000);
+;cb0[43]:=($1000004,$88000001,$8D80000,$1100000);
+;cb0[44]:=($D8000008,$D282000,$D2820,$10000001);
+;cb0[45]:=($11100000,$2820000D,$4392000,$43920);
+;cb0[46]:=($10000011,$10504000,$105040,$39200004);
+;cb0[47]:=($35900000,$19691003,$19691003,$19691003);
+
+;dcl_input_position_interp(LINEAR_NOPERSPECTIVE) vWinCoord0.xy__
+;dcl D0=cb0[2].x, D1=cb0[2].y, D2=cb0[2].z, D3=cb0[2].w, D4=cb0[3].x, D5=cb0[3].y, dest=cb0[10].x, M0=r9.x, M1=r9.y, M2=r9.z, M3=r9.w, Res=r9.x
+;mov r0.x, vWinCoord0.x
+;mov r1.x, vWinCoord0.y
+mov r0.x, vAbsTid.x
+mov r0.y, vAbsTid.y
+iadd r9.x,r0.x,r0.y
+if_logicalnz r9.x
+;dcl magic=cb0[47].y
+mov r0.z, cb0[47].y
+uav_raw_store_id(0) mem.x, r0.x, r0.z
+uav_raw_store_id(0) mem.y, r0.y, r0.z
+;mov g[r0.x].x, cb0[47].y
+;mov g[r0.y].y, cb0[47].y
+endif
+endmain
+end
+';
+
+const uav:=true;
+
+var dev:=cal.devices[0];
+dev.activate;
+writeln(dev.dump);
+
+var bigkernel:=fileread('e8_013467ABD_uav.preil');
+
+//bigkernel:=test;
+
+var module:=dev.Context.NewModule(bigkernel);
+writeln(module.disasm);
+
+{var rCB0:=dev.NewResource(rlPinned,4,50,0);
+module['cb0']:=rCB0;
+
+var rGlobal:=dev.NewResource(rlPinned,4,50,1);
+module[uav?'uav0':'g[]']:=rGlobal;
+
+with Module.Run(8192,8192,0) do begin
+  WaitFor(false);
+  if Success then for var i:=0 to 7 do write(rGlobal.Ints[i],' ')
+             else writeLn('FAIL');
+
+  writeln('elapsed:',ElapsedTime_sec);
+  Free;
+end;}
+
+
+(* old hello world
+
+const uav:=true;
+
+const
+  HelloIL_ps:=
+'il_ps_2_0
+dcl_cb cb0[1]
+mov r0,g[0]
+iadd r0,r0,cb0[0]
+mov g[1],r0
+end';
+
+const
+  HelloIL_cs:=
+'il_cs_2_0
+dcl_num_thread_per_group 64,1,1
+dcl_cb cb0[1]
+dcl_raw_uav_id(0)
+dcl_literal l1,0,16,0,5
+mov r2.x,l1.x
+uav_raw_load_id(0) r0.xyzw, r2.x
+iadd r0,r0,cb0[0]
+iadd r0.x,r0.x,l1.w
+mov r2.x,l1.y
+uav_raw_store_id(0) mem, r2.x, r0
+end';
+
+var dev:=cal.devices[0];
+dev.activate;
+writeln(dev.dump);
+
+var module:=dev.Context.NewModule(uav?HelloIl_cs:HelloIl_ps);
+
+writeln(module.disasm);
+
+var rCB0:=dev.NewResource(rlPinned,4,1,0);
+module['cb0']:=rCB0;
+
+var rGlobal:=dev.NewResource(rlPinned,4,2,1);
+module[uav?'uav0':'g[]']:=rGlobal;
+
+rCB0.IntVArray:=( 1, 2, 3, 4);
+rGlobal.IntVArray:=(10,20,30,40);
+
+with Module.RunGrid(64,1,0) do begin
+  WaitFor(false);
+  if Success then for var i:=0 to 7 do write(rGlobal.Ints[i],' ')
+             else writeLn('FAIL');
+  Free;
+end;}
+
+dev.Deactivate;
+
+*)

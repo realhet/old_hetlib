@@ -1,0 +1,73 @@
+var kernel:=asm_isa(
+  isa79xx
+  numVGprs 64
+  numSgprs 105
+  cb0size  128
+
+(*  s_mov_b32 s8,$FFFFFFFF //minimum ticks       //ruins cb0 res const
+  s_mov_b32 s9,156      //iteration count     //ruins cb0 res const
+  @loop:
+    s_memtime s[12:13]   //ruins kernel params
+    s_waitcnt lgkmcnt(0)
+;--------- test code begin ----------------------------
+alias myv0..1=v[8:11]
+
+v_add_i32 v2,vcc,myv1,v60
+v_add_i32 v3,vcc,$45321F1A,v60
+v_add_i32 v3,vcc,s48,v3
+v_add_i32 v4,vcc,s12,v61
+v_alignbit_b32 v5,v2,v2,27
+v_add_i32 v5,vcc,$0C2E5374,v5
+v_add_i32 v6,vcc,v5,v4
+v_alignbit_b32 v7,v3,v3,27
+;--------- end of test code ---------------------------
+    s_memtime s[14:15]   //ruins kernel params
+    s_waitcnt lgkmcnt(0)
+    s_sub_u32 s14, s14, s12
+    s_min_u32 s8, s8, s14
+    s_sub_u32 s9,s9,1
+  s_cbranch_scc0 @loop
+
+  s_mov_b32 exec_hi,0
+  s_mov_b32 exec_lo,1
+  s_sub_i32 s8,s8,$1C //s_wait cost
+  s_lshr_b32 s8,s8,2  //1clk = 4cycles
+  v_mov_b32 v0, s8//mintime
+  v_mov_b32 v1,0  //addr
+  buffer_atomic_umin v0, v1, s[4:7], 0 offen*)
+
+  v_mov_b32 v6, $1234
+  v_mov_b32 v7, 0
+  tbuffer_store_format_x  v6, v7, s[8:11], 0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT]
+  s_endpgm
+);
+
+var i,j,k,dev:=cal.devices[0];
+dev.activate;writeln(dev.dump);
+
+var module:=dev.Context.NewModule(kernel);
+writeln(module.disasm);
+
+var rCB0:=dev.NewResource(rlLocal,4,128,0);
+module['cb0']:=rCB0;
+
+rCb0.IntVArray:=($0,0,0,0);
+
+var rGlobal:=dev.NewResource(rlPinned,1,20128*4,0);
+module['uav0']:=rGlobal;
+
+rGlobal.IntVArray:=($FFFFFFFF,0,0,0);
+
+with Module.RunGrid(64*10000,1,0) do begin
+  if Success then begin
+    for i:=0 to 3 do begin
+      write(format('%.4d:  ',i));
+      for j:=0 to 3 do write(format('%.8x ',rCb0.Ints[i<<2+j]));
+      writeln;
+    end;
+  end else writeLn('FAIL');
+
+  writeln('elapsed:',ElapsedTime_sec);
+  Free;
+end;
+

@@ -1,0 +1,947 @@
+//!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+//Important note for CAL
+//On hd7970 this needs the 11-12_amd_radeon_hd7900_win7_64 driver (or 12-2 on linux)
+//Otherwise the kernel will freeze
+
+////////////////////////////////////////////////////////////////////////////////////
+//  High Performance Fractal Compute Unit                                         //
+//  Thread-Linear memory layout                                                   //
+////////////////////////////////////////////////////////////////////////////////////
+
+const NewDriver:=false;  //not the 11.12 79xx exclusive driver
+#define BlockWidth32 12
+                  // ^^ must be 12
+
+const
+  ACarryCnt:=12,
+  MCarryCnt:=4;
+
+var RunIdx:=0, ACarryIdx, MCarryIdx; //generates different labels for each runs
+
+//functions generating indices
+function NextACarryIdx;
+begin
+  ACarryIdx++;
+  writeln('  ACarry:'&ACarryIdx);
+  if ACarryIdx>=ACarryCnt then raise exception.create('too many ACarry in run');
+  result:='';
+end;
+
+function NextMCarryIdx;
+begin
+  MCarryIdx++;
+  writeln('  MCarry:'&MCarryIdx);
+  if MCarryIdx>=MCarryCnt then raise exception.create('too many MCarry in run');
+  result:='';
+end;
+
+function ResetCarryIdx;
+begin
+  writeln('Run:'&RunIdx);
+  ACarryIdx:=-1;MCarryIdx:=-1; //0 is first, and it's preincremented
+  result:=''
+end;
+
+var kernel:=asm_isa(
+////////////////////////////////////////////////////////////////////////////////////
+//  Declarations                                                                  //
+////////////////////////////////////////////////////////////////////////////////////
+  isa79xx   numVGprs 84   numSgprs 105   cb0size  128   ldsSize 0
+
+;----Vector regs
+  alias RA0..11= V0
+  alias RB0..11=V12
+  alias RC0..11=V24
+  alias RD0..11=V36,  MAcc0..15=V24       ;mul accumulator
+  alias RE0..11=V48,  MRows0..7=V40       ;mul fetched rows
+  alias RF0..11=V60,  MCols0..23=V48, MCols24..47=V48   ;mul fetched cols, circular buffer
+  alias ThreadOfs=V72,JobId=V73,  Iter=V74,  T0..4=V75, MAcc16=V79{maps to T4}
+  alias MCarry0..3=V80  ;mul carryes
+
+;----Get AbsThreadId as soon as possible
+  v_mad_i32_i24 v0, s16, 64{threadgroupsize}, v0  //abstid
+  v_lshlrev_b32 ThreadOfs, 2, v0 //DWord offset for M and I   =AbsTID*4
+
+;----Scalar regs
+  alias UAV=![NewDriver?'S[8:11]':'S[4:7]']
+  ;s0..s3:temp  ;s12..s23:free
+;----load Scalar constants
+  alias BlockCnt        =s24, JobCnt      =s25, MaxIter   =s26,     WinWidth      =s27
+  alias KBase           =s28, CBase       =s29, JBase     =s30,     ThreadCnt4    =s31
+  alias BignumSize      =s32, BlockSize   =s33, MBase     =s34,     MStride       =s35
+  alias bailValue       =s36, DBase       =s37, IterCnt   =s38,     GlobalJobId   =s39
+  //s37..s39 reserved
+  s_buffer_load_dwordx16 S24, UAV, 0
+  s_waitcnt lgkmcnt(0)
+;----load K constants
+  alias K0..15=s40
+  s_buffer_load_dwordx16 K0, UAV, KBase
+  s_waitcnt lgkmcnt(0)
+;----temporary S block
+  alias RS0..11=s56 //..s67
+;----carry bits
+  alias ACarry0..23=s68 //..s91
+;----declare FCU specific S Registers
+  alias BlockIdx        =s104   ;0..BlockCount-1
+  alias BlockOfs        =s103   ;=BlockIdx*BlockSize
+  alias C0BlockOfs      =s102   ;=BlockIdx*BlockSize+CBase
+  alias RetAddr         =s[100:101]
+  #define call(addr)    s_getpc_b64 RetAddr  s_branch addr
+  #define ret           s_add_u32 RetAddr,RetAddr,4  s_setpc_b64 RetAddr
+  alias SavedExec       =s[98:99]
+  alias IsBail          =s[96:97]
+;----mul/sqr sppecific
+  alias AIdx=s92, BIdx=s93, VertIdx=s94, phase=s95
+
+  s_branch @main
+
+////////////////////////////////////////////////////////////////////////////////////
+//  Macroes                                                                       //
+////////////////////////////////////////////////////////////////////////////////////
+
+//----debug
+
+//destroys t0,t1
+#define Dump(value)\
+v_mov_b32 t0,value           \
+v_mov_b32 t1,DBase           \
+tbuffer_store_format_x t0, t1, UAV, 0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT] \
+s_add_i32 DBase, DBase, 4
+
+//----simple operations
+
+#define unaryRR(D,S0,op)     __for__(i in[0..11], op D[i], S0[i] )
+#define binaryRR(D,S0,S1,op) __for__(i in[0..11], op D[i], S0[i], S1[i] )
+
+#define MovRR(D,S) unaryRR(D,S,v_mov_b32)
+
+#define NotRR(D,S)      unaryRR(D,S,v_not_b32)
+#define AndRRR(D,S0,S1) binaryRR(D,S0,S1,v_and_b32)
+#define OrRRR(D,S0,S1)  binaryRR(D,S0,S1,v_or_b32)
+#define XorRRR(D,S0,S1) binaryRR(D,S0,S1,v_xor_b32)
+
+#define ClrRs __for__(i in[0..5], s_mov_b64 Rs[i*2],0 )
+
+#define ClrR(R) XorRRR(R,R,R)
+
+//----constant loads
+
+#define MovRsC(SrcIdx)                  \
+  s_mul_i32 s0, BignumSize, SrcIdx      \
+  s_add_u32 s0, C0BlockOfs, s0          \
+  s_add_u32 s1, s0, 32                  \
+  s_buffer_load_dwordx8 RS0, UAV, s0    \
+  s_buffer_load_dwordx4 RS8, UAV, s1    \
+  s_waitcnt lgkmcnt(0)
+
+#define MovRC(R,SrcIdx)                 \
+  MovRsC(SrcIdx)                        \
+  MovRR(R,Rs)
+
+#define MovRsL(Literal)         \
+  ClrRs                         \
+  s_mov_b32 RS11, Literal       \
+  s_add_i32 s0, BlockCnt, -1    \
+  s_cmp_lg_u32 s0, BlockIdx     \
+  s_cmov_b32 RS11, 0
+
+#define MovRsK(SrcIdx) MovRsL(K[SrcIdx])
+
+#define MovRL(R,Literal)        \
+  ClrR(R)                       \
+  s_mov_b32 s1,-1               \
+  s_add_i32 s0, BlockCnt, -1    \
+  s_cmp_lg_u32 s0, BlockIdx     \
+  s_cmov_b32 s1, 0              \
+  v_mov_b32 R[11], Literal      \
+  v_and_b32 R[11], s1, R[11]
+
+//----access I, M  t0:address
+
+#define _AccessI(idx)\
+  v_mov_b32 t0, Idx                        \
+  v_sub_i32 t0, vcc, -1, t0                \
+  v_mul_u32_u24 t0, ThreadCnt4, t0         \
+  v_add_i32 t0, vcc, MBase, t0             \
+  v_add_i32 t0, vcc, ThreadOfs, t0
+
+#define _AccessM_ActBlock(Idx)\
+  v_mov_b32     t0, Idx                 \
+  v_mul_u32_u24 t0, BignumSize, t0      \
+  v_add_i32     t0, vcc, BlockOfs, t0   \
+  v_mul_u32_u24 t0, ThreadCnt4, t0      \
+  v_lshrrev_b32 t0, 2, t0               \
+  v_add_i32     t0, vcc, MBase, t0      \
+  v_add_i32     t0, vcc, ThreadOfs, t0
+
+//----memory loads
+
+#define MovRM(Reg,Idx)   \
+  _AccessM_ActBlock(Idx)          \
+  s_mov_b32 m0, 0        \
+  __for__(i in[0..11], tbuffer_load_format_x Reg[i], t0, UAV, m0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT] s_add_u32 m0, m0, ThreadCnt4) \
+  s_waitcnt vmcnt(0)
+
+#define ifLastBlock             \
+  s_mov_b64 s2,exec             \
+  s_add_i32 s0, BlockCnt, -1    \
+  s_cmp_lg_u32 s0, BlockIdx     \
+  s_cmov_b32 exec_hi,0          \
+  s_cmov_b32 exec_lo,0
+
+#define endIfLastBlock  s_mov_b64 exec,s2
+
+#define MovLI(Literal,Idx)\
+  _AccessI(Idx)                       \
+  tbuffer_load_format_x Literal, t0, UAV,  0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT] \
+  s_waitcnt vmcnt(0)
+
+#define MovRI(R,Idx)              \
+  ClrR(R)                         \
+  ifLastBlock                     \
+    MovLI(R[11], Idx)             \
+  endIfLastBlock
+
+//----memory stores
+
+#define MovMR(Idx,Reg)   \
+  _AccessM_ActBlock(Idx)          \
+  s_mov_b32 m0, 0        \
+  __for__(i in[0..11], tbuffer_store_format_x Reg[i], t0, UAV, m0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT] s_add_u32 m0, m0, ThreadCnt4) \
+  s_waitcnt expcnt(0)
+
+#define MovIL(Idx,Literal)\
+  _AccessI(Idx)                      \
+  tbuffer_store_format_x Literal, t0, UAV,  0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT] \
+  s_waitcnt expcnt(0)
+
+#define MovIR(Idx,Reg) \
+  ifLastBlock          \
+    MovIL(Idx,Reg[11]) \
+  endIfLastBlock
+
+#define MovJL(Idx,Src) \
+  v_mov_b32 t1,Src     \
+  v_mad_i32_i24 t0, JobId, 4, Jbase       \
+  tbuffer_store_format_x  t1, t0, UAV, 0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT]
+
+//----Simple Operations
+
+#define AddSubRRR(D,S0,S1,C,op)                         \
+  op D[ 0], vcc, S0[ 0], S1[ 0],ACarry[C]               \
+  __for__(i in [1..10], op D[i], vcc, S0[i], S1[i],vcc) \
+  op D[11], ACarry[C], S0[11], S1[11],vcc
+
+#define AddRRR(D,S0,S1) ![NextACarryIdx] AddSubRRR(D,S0,S1,![ACarryIdx],v_addc_u32)
+#define SubRRR(D,S0,S1) ![NextACarryIdx] AddSubRRR(D,S0,S1,![ACarryIdx],v_subb_u32)
+
+
+#define _mi(D,S,I,n)                   \
+  v_mul_hi_u32 t1,   I, S[n]           \
+  v_mul_lo_u32 D[n], I, S[n]           \
+  v_add_i32    D[n], vcc, D[n], t2     \
+  v_addc_u32   t2, vcc, 0, t1, vcc
+
+#define MulRRLC(D,S,I,CIdx)            \
+  v_mov_b32 t3,I                       \
+  v_mov_b32 t2, MCarry[CIdx]           \
+  __for__(j in[0..11], _mi(D,S,t3,j) ) \
+  v_mov_b32 MCarry[CIdx],t2
+
+#define MulRRL(D,S,I) ![NextMCarryIdx] MulRRLC(D,S,I,![MCarryIdx])
+#define MulRRI(D,S,Idx)  MovLI(t4,Idx) MulRRL(D,S,t4)
+
+
+#define BailR(S) v_cmp_le_i32 IsBail, BailValue, S[11]
+
+//----BlockIdx loop
+
+#define ClearCarry __for__(i:=0 to 22 step 2, s_mov_b64 ACarry[i],0 )\
+                   __for__(i in[0..3], v_mov_b32 MCarry[i],0 )
+
+#define BeginRun\
+  ![ResetCarryIdx]                      \
+  ClearCarry                            \
+  s_movk_i32    BlockIdx, 0             \
+  \@BlockLoop![++RunIdx]:               \
+    s_mul_i32     BlockOfs, BlockSize, BlockIdx  {relative block ofs in any bignum}\
+    s_addc_u32    C0BlockOfs, BlockOfs, CBase    {abslute block ofs in UAV}
+
+#define EndRun\
+    s_add_i32     BlockIdx, BlockIdx, 1 \
+    s_cmp_ge_i32  BlockIdx, BlockCnt    \
+  s_cbranch_scc0 @BlockLoop![runIdx]
+
+
+////////////////////////////////////////////////////////////////////////////////////
+//  Multiply/Square                                                               //
+////////////////////////////////////////////////////////////////////////////////////
+
+//debug
+
+#define dumpMCols __for(i in[0..23], dump(MCols[i]) )
+#define dumpMRows __for(i in[0.. 7], dump(MRows[i]) )
+#define dumpMAcc  __for(i in[0..15], dump(MAcc[i]) )
+
+//---- MCol Shifting --------
+
+#define _MColsShrTop8(i) v_mov_b32 MCols[i], MCols[i+8]
+#define _MColsShrTop8 __for__(i in[0..15], _MColsShrTop8(i) )
+
+#define _MColsShrTop16(i) v_mov_b32 MCols[i], MCols[i+16]
+#define _MColsShrTop16 __for__(i in[0..15], _MColsShrTop16(15-i) ) //goes bacwards to avoid overrides
+
+//---- MULTIPLY macroes ------
+
+#define _MulFullCell(CIdx,RIdx,AccIdx,CIn)                    \
+  v_mul_u32_u24    Work, MCols[CIdx], MRows[RIdx]             \
+  v_add_i32        MAcc[AccIdx], vcc, MAcc[AccIdx], Work      \
+  v_mul_hi_u32_u24 Work, MCols[CIdx], MRows[RIdx]             \
+  v_addc_u32       Carry, vcc, CIn, Work, vcc
+
+#define _MulFullCellFirst(CIdx,RIdx,AccIdx) _MulFullCell(CIdx,RIdx,AccIdx,0)
+#define _MulFullCell(CIdx,RIdx,AccIdx)      _MulFullCell(CIdx,RIdx,AccIdx,Carry)
+
+#define _MulFullCol(n,CIdx,RIdx)                              \
+  _MulFullCellFirst(CIdx+RIdx+0,7,RIdx)                       \
+  __for__(i in[1..n-1], _MulFullCell(CIdx+RIdx+i,7-i,RIdx) )
+
+#define _MulAcc(Idx)                                          \
+  v_alignbit_b32 Carry, Carry, MAcc[Idx], 24                  \
+  v_and_b32      MAcc[Idx], _FFFFFF, MAcc[Idx]                \
+  v_add_i32      MAcc[Idx+1], vcc, MAcc[Idx+1], Carry
+
+#define _MulFull(CIdx) __for__(i in[0..15], _MulFullCol(8,CIdx,i) _MulAcc(i) )
+
+#define _MulTopHalf(CIdx) __for__(i in[0..15],_MulFullCol(min(16-i,8), CIdx, i) _MulAcc(i) )
+
+#define _MulBottomHalf(CIdx)  \
+  __for__(i in[0..7], _MulFullCol(8-i,CIdx, i) _MulAcc(i) )   \
+  __for__(i in[8..9], v_mov_b32 Carry,0        _MulAcc(8) )
+
+//---- SQR macroes ---------
+
+#define _SqrHalfCell(CIdx,RIdx,AccIdx,CIn)                    \
+  v_mul_u32_u24    Work, MCols[CIdx], MCols[RIdx+8]           \
+  v_add_i32        MAcc[AccIdx], vcc, MAcc[AccIdx], Work      \
+  v_mul_hi_u32_u24 Work, MCols[CIdx], MCols[RIdx+8]           \
+  v_addc_u32       Carry, vcc, CIn , Work, vcc
+
+#define _SqrHalfCellFirst(CIdx,RIdx,AccIdx) _SqrHalfCell(CIdx,RIdx,AccIdx,0)
+#define _SqrHalfCell(CIdx,RIdx,AccIdx)      _SqrHalfCell(CIdx,RIdx,AccIdx,Carry)
+
+#define _SqrHalfCol(n,CIdx,RIdx)                                   \
+  _SqrHalfCellFirst(CIdx+RIdx+0,CIdx+7,RIdx)                       \
+  __for__(i in[1..n-1], _SqrHalfCell(CIdx+RIdx+i,CIdx+7-i,RIdx) )
+
+#define _SqrX2(i) v_lshlrev_b32 MAcc[i],1,MAcc[i]
+
+#define _SqrHalf(CIdx)                   \
+  {sum up doubles}                       \
+  __for__(i in[0..14], _SqrHalfCol((16-i)>>1,CIdx, i) _MulAcc(i) ) \
+  v_mov_b32 Carry,0     _MulAcc(15)      \
+  {duplicate everything}                 \
+  __for__(i in[0..16], _SqrX2( i) )      \
+  {add 1*prevcarry}                      \
+  v_add_i32  MAcc[0],vcc, PrevCarry,MAcc[0]          \
+  {add odds}                                         \
+  __for__(i in[0..7], v_mov_b32 Carry,0                              _MulAcc(i*2+0)   \
+                      _SqrHalfCellFirst(CIdx+i*2+1+7-i,CIdx+i,i*2+1) _MulAcc(i*2+1) )
+
+//Pack/Unpack
+
+#define _MulPackMAccPart(Reg,i)\
+s_mov_b32 s0,$10000 \
+  v_lshlrev_b32 Reg[0+i*3],24,MAcc[1+i*4]  v_or_b32      Reg[0+i*3],       MAcc[0+i*4],Reg[0+i*3]\
+s_movk_i32 s1,$100 \
+  v_lshrrev_b32 Reg[1+i*3], 8,MAcc[1+i*4]  v_mad_u32_u24 Reg[1+i*3],s0    ,MAcc[2+i*4],Reg[1+i*3]\
+  v_lshrrev_b32 Reg[2+i*3],16,MAcc[2+i*4]  v_mad_u32_u24 Reg[2+i*3],s1    ,MAcc[3+i*4],Reg[2+i*3]
+
+#define _MulPackMAcc(Reg) __for__(i in[0..3], _MulPackMAccPart(Reg,i) )
+
+#define ResetMAcc __for__(i in[0..16], v_mov_b32 MAcc[i],0 )
+
+//x[1..3] -> x[0..3]
+#define _MulUnpack(reg,i,negMask)            \
+  v_and_b32      Reg[i+0],_FFFFFF,Reg[i+1]   \
+  v_alignbit_b32 Reg[i+1],Reg[i+2],Reg[i+1],24  v_and_b32 Reg[i+1],_FFFFFF,Reg[i+1] \
+  v_alignbit_b32 Reg[i+2],Reg[i+3],Reg[i+2],16  v_and_b32 Reg[i+2],_FFFFFF,Reg[i+2] \
+  v_lshrrev_b32 Reg[i+3],8 ,Reg[i+3]         \
+  __for__(j in[0..3], v_xor_b32 Reg[i+j],negMask,Reg[i+j] )
+
+//----Fetch cols/rows
+
+//destroys t0    Tested OK
+#define _MulFetchCols(phase, negMask)\
+  v_add_i32 t0, vcc, BIdx, ThreadOfs \
+  s_mov_b32 m0,0                     \
+  tbuffer_load_format_x MCols[phase*8+0+1], t0, UAV,  m0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT] \
+  s_add_i32 m0, m0, ThreadCnt4    \
+  tbuffer_load_format_x MCols[phase*8+0+2], t0, UAV,  m0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT] \
+  s_add_i32 m0, m0, ThreadCnt4    \
+  tbuffer_load_format_x MCols[phase*8+0+3], t0, UAV,  m0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT] \
+  s_add_i32 m0, m0, ThreadCnt4    \
+  tbuffer_load_format_x MCols[phase*8+4+1], t0, UAV,  m0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT] \
+  s_add_i32 m0, m0, ThreadCnt4    \
+  tbuffer_load_format_x MCols[phase*8+4+2], t0, UAV,  m0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT] \
+  s_add_i32 m0, m0, ThreadCnt4    \
+  tbuffer_load_format_x MCols[phase*8+4+3], t0, UAV,  m0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT] \
+  s_add_i32 m0, m0, ThreadCnt4    \
+  s_add_i32 BIdx, BIdx, m0            \
+  s_waitcnt vmcnt(0)                  \
+  _MulUnpack(MCols,phase*8+0,negMask) \
+  _MulUnpack(MCols,phase*8+4,negMask)
+
+//destroys t0
+#define _MulFetchRows(negMask)\
+  s_mul_i32 m0, ThreadCnt4, 6        \
+  s_sub_i32 AIdx, AIdx, m0           \
+  v_add_i32 t0, vcc, AIdx, ThreadOfs \
+  s_mov_b32 m0,0                     \
+  tbuffer_load_format_x MRows[0+1], t0, UAV,  m0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT] \
+  s_add_i32 m0, m0, ThreadCnt4    \
+  tbuffer_load_format_x MRows[0+2], t0, UAV,  m0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT] \
+  s_add_i32 m0, m0, ThreadCnt4    \
+  tbuffer_load_format_x MRows[0+3], t0, UAV,  m0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT] \
+  s_add_i32 m0, m0, ThreadCnt4    \
+  tbuffer_load_format_x MRows[4+1], t0, UAV,  m0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT] \
+  s_add_i32 m0, m0, ThreadCnt4    \
+  tbuffer_load_format_x MRows[4+2], t0, UAV,  m0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT] \
+  s_add_i32 m0, m0, ThreadCnt4    \
+  tbuffer_load_format_x MRows[4+3], t0, UAV,  m0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT] \
+  s_waitcnt vmcnt(0)          \
+  _MulUnpack(MRows,0,negMask) \
+  _MulUnpack(MRows,4,negMask)
+
+#define VertCnt(dst) s_sub_u32 dst, BlockCnt, BlockIdx
+
+#define SwitchPhase0(name) s_cmpk_eq_i32 phase,0  s_cbranch_scc0 label_##name##_1
+#define SwitchPhase1(name) s_branch label_##name##_3 \ label_##name##_1: \ s_cmpk_eq_i32 phase,1  s_cbranch_scc0 label_##name##_2
+#define SwitchPhase2(name) s_branch label_##name##_3 \ label_##name##_2:
+#define SwitchPhaseEnd(name) label_##name##_3:
+
+//----- Common MUL and SQR subroutines
+
+#define callS0(addr)    s_getpc_b64 S0  s_branch addr
+#define retS0           s_add_u32 S0,S0,4  s_setpc_b64 S0
+
+@MulFull:  //in t3:negMask  s3:FFFFFF
+
+  #define  Work      t0
+  #define  Carry     t1
+  #define  negMask   t3
+  #define _FFFFFF s3
+
+  switchPhase0(MulFull)
+    _MulFetchCols(2,negMask)
+    _MulFull(0)
+  switchPhase1(MulFull)
+    _MulFetchCols(0,negMask)
+    _MulFull(8)
+  switchPhase2(MulFull)
+    _MulFetchCols(1,negMask)
+    _MulFull(16)
+  switchPhaseEnd(MulFull)
+
+  #undef  Work      t0
+  #undef  Carry     t1
+  #undef  negMask   t3
+  #undef _FFFFFF s3
+retS0
+
+@ShiftMColsPhase:
+  switchPhase0(ShiftMColsPhase)
+
+  switchPhase1(ShiftMColsPhase)
+    _MColsShrTop8           ;rotate the last 16 limbs to MCols[0]
+  switchPhase2(ShiftMColsPhase)
+    _MColsShrTop16
+  switchPhaseEnd(ShiftMColsPhase)
+retS0
+
+//----- SQR subroutine ------
+
+@SqrAM:  //in: AIdx:mem index  MAcc0:carryIn out:MAcc16, t2:negMask
+  ResetMAcc
+
+  #define  Work      t0
+  #define  Carry     t1
+  #define  PrevCarry t2
+  #define  negMask   t3
+  //       MAcc17 t4
+
+  #define _FFFFFF s3
+  s_mov_b32 s3, $FFFFFF
+
+  s_mul_i32 AIdx, AIdx, BigNumSize //offset in mem/const
+  s_mul_i32 AIdx, AIdx, ThreadCnt4 s_lshr_b32 AIdx, AIdx, 2
+  s_mov_b32 BIdx, AIdx
+
+  s_mul_i32 s0, BlockCnt, BlockSize
+  s_mul_i32 s0, s0, ThreadCnt4 s_lshr_b32 s0, s0, 2
+  s_add_i32 AIdx, AIdx, s0  //early --
+
+  s_mul_i32 s1, BlockIdx, BlockSize
+  s_mul_i32 s1, s1, ThreadCnt4 s_lshr_b32 s1, s1, 2
+  s_add_i32 BIdx, BIdx, s1  //++ after
+
+  s_add_i32 AIdx, AIdx, MBase
+  s_add_i32 BIdx, BIdx, MBase
+
+  //negMask
+  v_add_i32 t0, vcc, AIdx, ThreadOfs
+  v_subrev_i32 t0, vcc, ThreadCnt4, t0       //negative (offen) offset become unsigned in tbuffer (64bit addr)
+  tbuffer_load_format_x negMask, t0, UAV, 0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT]
+  s_waitcnt vmcnt(0)
+  v_ashrrev_i32 negMask, 31, negMask
+  v_and_b32     negMask, _FFFFFF, negMask
+
+  //first col fetches
+  _MulFetchCols(0,negMask)
+  _MulFetchCols(1,negMask)
+
+  //save carry for later, or else it would be doubled
+  v_mov_b32 PrevCarry, MAcc[0]
+  v_mov_b32 MAcc[0],0
+
+  s_mov_b32 Phase, 0
+  s_mov_b32 VertIdx, 0 //vertIdx: 0..BlockIdx-1
+  @SqrAMLoop:
+
+    vertCnt(s0)  s_add_i32 s0, s0, -1  s_cmp_eq_i32 s0, VertIdx //if not Last vertIdx
+    s_cbranch_scc1 @SqrAM_Last
+
+      //fetch rows
+      _MulFetchRows(negMask)
+
+      CallS0(@MulFull)
+
+    s_branch @SqrAM_Cont \ @SqrAM_Last:                         // if Last vertIdx
+
+      CallS0(@ShiftMColsPhase)
+
+      _SqrHalf(0)  //adds incoming carry too
+
+    @SqrAM_Cont:                                                // end if
+
+    s_addk_i32 phase,1 \ s_cmpk_eq_i32 phase, 3 \ s_cmovk_i32 phase,0 //increment phase 0..2
+    s_addk_i32 VertIdx, 1  vertCnt(s0) s_cmp_eq_u32  VertIdx, s0      //increment vertIdx 0..VertCnt
+  s_cbranch_scc0 @SqrAmLoop
+
+  #undef Work
+  #undef Carry
+  #undef PrevCarry
+  #undef negMask
+ret
+
+#define SqrRM(Reg,MIdx)                  \
+  ![NextMCarryIdx]                       \
+  s_mov_b32 AIdx,MIdx                    \
+  v_mov_b32 MAcc[0],MCarry[![MCarryIdx]] \
+  call(@SqrAM)\                          \
+  v_mov_b32 MCarry[![MCarryIdx]],MAcc[16]\
+  _MulPackMAcc(Reg)
+
+//----- MUL subroutine ------
+(*
+#define VertCnt2(dst) vertCnt(dst) s_add_u32 dst,dst,dst
+
+@MulAMM:  //in: AIdx,BIdx:mem index  MAcc0:carryIn out:MAcc16, t2,t3:negMask
+  ResetMAcc
+
+  #define  Work     t0
+  #define  Carry    t1
+  #define  negMask1 t2
+  #define  negMask2 t3
+  //       MAcc17 t4
+
+  #define _FFFFFF s3
+  s_mov_b32 s3, $FFFFFF
+
+  s_mul_i32 AIdx, AIdx, BigNumSize //offset in mem/const   (MRows)
+  s_mul_i32 BIdx, BIdx, BigNumSize //offset in mem/const   (MCols)
+
+  s_mov_b32 s0, BigNumSize \ s_sub_u32 s0, s0, 4    //s0: lastLimb offset
+  //negMask1
+  v_add_i32 t0, vcc, AIdx, MBase
+  v_add_i32 t0, vcc, s0, t0
+  tbuffer_load_format_x t1, t0, UAV, 0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT]
+  s_waitcnt vmcnt(0)
+  v_ashrrev_i32 t1, 31, t1 \ v_and_b32  negMask1, _FFFFFF, t1
+
+  //negMask2
+  v_add_i32 t0, vcc, BIdx, MBase
+  v_add_i32 t0, vcc, s0, t0
+  tbuffer_load_format_x t1, t0, UAV, 0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT]
+  s_waitcnt vmcnt(0)
+  v_ashrrev_i32 t1, 31, t1 \ v_and_b32  negMask2, _FFFFFF, t1
+
+  s_mul_i32 s0, BlockCnt, BlockSize  s_add_i32 AIdx, AIdx, s0  //early --
+  s_mul_i32 s1, BlockIdx, BlockSize  s_add_i32 BIdx, BIdx, s1  //++ after
+
+  //first col fetches
+  _MulFetchCols(0,negMask2)
+  _MulFetchCols(1,negMask2)
+
+  s_mov_b32 Phase, 0
+  s_mov_b32 VertIdx, 0 //vertIdx: 0..BlockIdx-1
+  @MulAMMLoop:
+
+    //fetch rows
+    _MulFetchRows(negMask1)
+
+    vertCnt2(s0)
+    s_add_i32 s0, s0, -1  s_cmp_eq_i32 s0, VertIdx  s_cbranch_scc1 @MulAMM_Last
+    s_add_i32 s0, s0, -1  s_cmp_eq_i32 s0, VertIdx  s_cbranch_scc1 @MulAMM_LastBefore
+                                                                  //if not Last vertIdx
+      CallS0(@MulFull)
+
+    s_branch @MulAMM_Cont \ @MulAMM_LastBefore:                   // if Last-1 vertIdx
+
+      CallS0(@ShiftMColsPhase)
+
+      _MulTopHalf(0)
+
+    s_branch @MulAMM_Cont \ @MulAMM_Last:                         // if Last vertIdx
+
+      _MulBottomHalf(8)        ;already rotater by mulTop
+
+    @MulAMM_Cont:                                                // end if
+
+    s_addk_i32 phase,1 \ s_cmpk_eq_i32 phase, 3 \ s_cmovk_i32 phase,0 //increment phase 0..2
+    s_addk_i32 VertIdx, 1  vertCnt2(s0) s_cmp_eq_u32  VertIdx, s0     //increment vertIdx 0..VertCnt
+  s_cbranch_scc0 @MulAMMLoop
+
+  #undef  Work     t0
+  #undef  Carry    t1
+  #undef  negMask1 t2
+  #undef  negMask2 t3
+ret
+
+#define MulRMM(Reg,M0Idx,M1Idx)          \
+  ![NextMCarryIdx]                       \
+  s_mov_b32 AIdx,M0Idx                   \
+  s_mov_b32 BIdx,M1Idx                   \
+  v_mov_b32 MAcc[0],MCarry[![MCarryIdx]] \
+  call(@MulAMM)\                         \
+  v_mov_b32 MCarry[![MCarryIdx]],MAcc[16]\
+  _MulPackMAcc(Reg)
+
+*)
+////////////////////////////////////////////////////////////////////////////////////
+//  Fractal specific macroes                                                      //
+////////////////////////////////////////////////////////////////////////////////////
+
+{out: I0, I1  integer winx,y coordinates}
+#define SetupWinCoords                      \
+  v_cvt_f32_i32   t0, JobId                 \
+  v_cvt_f32_i32   t1, winWidth              \
+  v_rcp_f32       t1, t1                    \
+  v_mul_f32       t0, t1, t0                \
+  v_cvt_flr_i32_f32  t3{Y}, t0              \
+  v_mul_lo_u32    t0, winWidth, t3{Y}       \
+  v_sub_i32       t2{X}, vcc, JobId, t0     \
+  MovIL(0,t2) MovIL(1,t3)  {upload winx and winy to I0,I1}
+
+{out: t0:iteration count (float)}
+#define DiscreteIter          \
+  v_cvt_f32_u32 t0, Iter
+
+{in: I0 8bitFixp, out: t0}
+#define SmoothIter                                                                  \
+  MovLI(t0,0)                                                                       \
+  v_cvt_f32_i32 t0, t0                                                              \
+  v_mul_f32   t0, 0.00390625, t0   { /256 }                                         \
+                                                                                    \
+  v_log_f32   t0, t0                                                                \
+  v_log_f32   t0, t0                                                                \
+  v_sub_f32   t0, 1.0, t0          {smooth coloring:  1-log2(log2((xx*xx+yy*yy)))}  \
+                                                                                    \
+  v_cvt_f32_u32 t1, Iter                                                            \
+  v_add_f32     t0, t0, t1         {t0: smooth iteration count        }
+
+{in: t0:float,  out:t0:rgba,  a,b,c,d are coefficients, d is scale }
+#define SinusPalette(a,b,c,d)     \
+  {in: t0:float  out: t0:rgb}     \
+  v_mov_b32 t2, 128.0             \
+  v_mul_f32 t0, d, t0             \
+  v_mul_f32 t1, a, t0 \ v_sin_f32 t1, t1 \ v_mad_f32 t1, t1, t2, t2 \ v_cvt_pk_u8_f32 t3, t1, 0, 0  \
+  v_mul_f32 t1, b, t0 \ v_sin_f32 t1, t1 \ v_mad_f32 t1, t1, t2, t2 \ v_cvt_pk_u8_f32 t3, t1, 1, t3 \
+  v_mul_f32 t1, c, t0 \ v_sin_f32 t1, t1 \ v_mad_f32 t1, t1, t2, t2 \ v_cvt_pk_u8_f32 t3, t1, 2, t3 \
+  v_mov_b32 t0,t3
+
+
+////////////////////////////////////////////////////////////////////////////////////
+//  Main JobLoop                                                                  //
+////////////////////////////////////////////////////////////////////////////////////
+@main:
+
+  s_xor_b64 exec, exec, exec //Active threads: none at start
+  @JobLoop:
+    ; fetch new jobs if exec<>-1
+    s_not_b64 vcc, exec
+    s_cbranch_vccz @SkipFetch
+      ; save exec
+      s_mov_b64   SavedExec, exec    //save active jobs
+      s_mov_b64   exec, vcc
+      ; get next jobs
+      v_mov_b32   t0, 60             //JobIds addess on UAV (15*4)
+      v_mov_b32   JobId, 1           //increment / result
+      buffer_atomic_add  JobId, t0, UAV, 0 offen glc
+      s_waitcnt   vmcnt(0)
+      ; check JobCount
+      v_cmp_gt_i32  vcc, JobCnt, JobId \ s_mov_b64   exec, vcc
+      ; initialize new jobs
+      s_cbranch_execz @SkipInitJob
+        v_mov_b32       Iter, 0
+
+        {!INIT}//-----------------------------------------------------------
+        SetupWinCoords                          //I0,I1: winx,winy
+        BeginRun
+          MovRC(RA,0)        MovRR(RB,RA)       //load step
+          MulRRI(RA,RA,0)    MulRRI(RB,RB,1)    //step*(winx,winy)
+          MovRC(RC,1)        MovRC(RD,2)        //load Cx0,Cy0
+          AddRRR(RA,RA,RC)   AddRRR(RB,RB,RD)   //add Cx, Cy
+          MovMR(3,RA)        MovMR(4,RB)        //store in M3, M4
+          ClrR(RA)
+          MovMR(0,RA) MovMR(1,RA) MovMR(2,RA)   //X=Y=Z=0
+        EndRun
+        {!INIT.END}//-------------------------------------------------------
+
+      @SkipInitJob:
+      s_or_b64    exec, exec, SavedExec ; combine new jobs with existing jobs
+      s_cbranch_execz @End              ; exit if nothing to do  (also _scc0 is ok)
+    @SkipFetch:
+    ;------------------------------------ do the jobs here
+    @Job:
+      s_mov_b64    IsBail,-1                  ;bailOut is default
+
+      {!MAIN}//-------------------------------------------------------------
+      BeginRun
+        sqrRM(RA,0)      sqrRM(RB,1)      sqrRM(RC,2)             {a:=x*x;    b:=y*y;     c:=z*z;}
+        subRRR(RD,RA,RB) addRRR(RA,RA,RB) subRRR(RC,RC,RA)        {d:=a-b;   a:=a+b;     c:=c-a;}
+        bailR(RA)                                                 {bail:=a.Truncated>=4;}
+        movRM(RA,3) addRRR(RD,RD,RA) movRM(RB,4) addRRR(RC,RC,RB) {d:=d+cx;    c:=c+cy;}
+        addRRR(RB,RC,RD)                                          {z:=d+c;}
+        movMR(0,RD)  movMR(1,RC)  movMR(2,RB)                     {x:=d; y:=c; z:=b;}
+      EndRun
+      {!MAIN.END}//---------------------------------------------------------
+
+      v_add_i32    Iter, vcc, 1, Iter           ; check maximum iterations
+      v_cmp_le_i32 vcc, MaxIter, Iter
+      s_or_b64     vcc, vcc, IsBail             ; vcc: finished jobs
+      s_and_b64    vcc, vcc, exec               ; restrict to actual threads
+    s_cbranch_vccz @Job                         ; loop until we have a finished job
+    ;------------------------------------ some jobs are finished: bits set in vcc
+    s_andn2_b64 SavedExec, exec, vcc            ; s0: exec mask after finishing some jobs
+    s_mov_b64 exec, vcc                         ; exec: finished jobs
+    ;------------------------------------ write the result
+    v_mov_b32   t0, 56
+    v_mov_b32   t1, Iter
+    buffer_atomic_add  t1, t0, UAV, 0 offen  //increment IterCnt
+
+    {!FINAL}//--------------------------------------------------------------
+    BeginRun
+      sqrRM(RA,0)  sqrRM(RB,1)  addRRR(RA,RA,RB)
+      movIR(0,RA)                                ;x*x+y*y
+    EndRun
+    SmoothIter
+    v_sqrt_f32 t0, t0
+    SinusPalette(1.02164,1.23564,1.41842, 0.2)
+    MovJL(0,t0)
+    {!FINAL.END}//----------------------------------------------------------
+
+    s_mov_b64 exec, SavedExec                    ; set the updated exec mask
+  s_branch @JobLoop
+  @End:
+
+s_endpgm
+);
+
+{!KERNEL.END}
+
+////////////////////////////////////////////////////////////////////////////////////
+//  HOST program                                                                  //
+////////////////////////////////////////////////////////////////////////////////////
+
+function AlignUp(x,bound);
+begin
+  result:=(x+bound-1)and not(bound-1);
+end;
+
+//FCU constants
+const
+  BlockHeight32:=BlockWidth32>>1,
+  BlockWidth24:=BlockWidth32 div 3*4,
+  BlockHeight24:=BlockHeight32 div 3*4,
+
+  MRegCnt:=5,    //Read/Write Bignums
+  IRegCnt:=16,   //Read/Write DWords
+  CRegCnt:=3,    //ReadOnly Bignums
+  KRegCnt:=16,   //ReadOnly Bignums   //depends on kernel implementation
+  DRegCnt:=1024,  //Debug regs
+  ResultSize:=1, //Job's result size
+
+  ThreadCnt:=512, //Worker thrads
+  BlockCnt:=4,   //Bignum blocks
+  WinWidth:=100,
+  WinHeight:=100,
+  JobCnt:=WinWidth*WinHeight,
+  MaxIter:=100,
+  BailValue:=4, //8bit fixp
+
+  BigNumSize32:=BlockCnt*BlockWidth32,
+  BigNumSize24:=BlockCnt*BlockWidth24,
+
+  //base offsets in memory in DW units
+  KBase:=16,                         //K 32bit constant area
+  CBase:=KBase+KRegCnt,              //C Bignum constants area
+  IBase:=CBase+BigNumSize32*CRegCnt,
+  ISize:=IRegCnt*ThreadCnt,
+  MBase:=AlignUp(IBase+ISize,2048),
+  MSize:=MRegCnt*BigNumSize32*ThreadCnt,
+  JBase:=MBase+MSize,
+  JSize:=1,
+  DBase:=JBase+JobCnt*JSize,
+  AllSize:=DBase+DRegCnt;
+
+
+procedure DumpFCUData(res);
+
+  function BigNumHdr;var i,j;
+  begin result:='';
+    for i:=BlockCnt-1 downto 0 do begin
+      for j:=BlockWidth32 div 3*4-1 downto 0 do
+        result&=format('%6d',i*BlockWidth24+j);
+      result&=' ';
+    end;
+  end;
+
+  function BigNumToStr(res,ofs,stride);var i,j;
+  begin result:='';
+    for i:=BlockCnt-1 downto 0 do begin
+      for j:=BlockWidth32-1 downto 0 do
+        result&=format('%.8x',res.Ints[ofs+(i*BlockWidth32+j)*stride]);
+      result&=' ';
+    end;
+  end;
+
+var i,j,k;
+begin
+  writeln('Kernel params:');
+  for i:=0 to KBase-1 step 4 do
+    writeln(format('%6d: %8d %8d %8d %8d',i,res.Ints[i],res.Ints[i+1],res.Ints[i+2],res.Ints[i+3]));
+
+  writeln('Constants:');
+  for i:=KBase to KBase+KRegCnt-1 step 4 do
+    writeln(format('  K%-2d: %8x %8x %8x %8x',i-KBase,res.Ints[i],res.Ints[i+1],res.Ints[i+2],res.Ints[i+3]));
+  writeln('       ',BigNumHdr);
+  for i:=0 to CRegCnt-1 do
+    writeln('  C'&i&' : ', BigNumToStr(res,CBase+i*BigNumSize32,1));
+
+  for j:=0 to min(ThreadCnt,64)-1 do begin
+    writeln(format('Thread%d:',j));
+    for i:=0 to IRegCnt-1 step 4 do begin
+      write(format('  I%-2d:',i));
+      for k:=0 to 3 do write(format(' %8x',res.Ints[MBase-(i+k+1)*ThreadCnt+j]));
+      writeln;
+    end;
+    writeln('       ',BigNumHdr);
+    for i:=0 to MRegCnt-1 do
+      writeln('  M'&i&' : ', BigNumToStr(res,MBase+(i*BigNumSize32)*ThreadCnt+j,ThreadCnt));
+  end;
+
+  writeln('Results:');
+  for i:=0 to min(16,WinHeight)-1 do begin
+    for j:=0 to min(16,WinWidth)-1 do
+      Write(format(' %8x',res.Ints[JBase+i*WinWidth+j]));
+    WriteLn;
+  end;
+
+  writeln('Debug:');
+  for i:=0 to DRegCnt-1 do begin
+    if(i and 3)=0 then write(format(' %4d: ',i));
+    Write(format(' %8x',res.Ints[DBase+i]));
+    if(i and 3)=3 then WriteLn;
+  end;
+end;
+
+procedure Test;
+
+  procedure SetC(n,value);
+  begin
+    rData.Ints[CBase+(n+1)*BigNumSize32-1]:=trunc(Value*256);
+    rData.Ints[CBase+(n+1)*BigNumSize32-1-1]:=trunc((value-trunc(Value*256)/256)*(2.0**32));
+  end;
+
+var i,j,k;
+begin
+  var dev:=cal.devices[0];dev.activate;//writeln(dev.dump);
+  var module:=dev.Context.NewModule(kernel);//writeln(module.disasm);
+
+
+  var rUAV, rCB0, rData;
+  if NewDriver then begin
+    rUAV:=dev.NewResource(rlPinned,4,64,0);module['cb0']:=rUAV;
+    rCB0:=dev.NewResource(rlPinned,1,AllSize,0);module['uav0']:=rCB0;
+    rData:=rCB0;
+  end else begin
+    rCB0:=dev.NewResource(rlPinned,4,64,0);module['cb0']:=rCB0;
+    rUAV:=dev.NewResource(rlPinned,1,AllSize,0);module['uav0']:=rUAV;
+    rData:=rUAV;
+  end;
+
+  writeln(format('KBase=%d, CBase=%d, JBase=%d, IBase=%d, ISize=%d, MBase=%d, MSize=%d',KBase,CBase,JBase,IBase,ISize,MBase,MSize));
+  writeln('Total mem size: '&AllSize*4&' bytes');
+
+(*  {C0}for i:=0 to BigNumSize32-1 do begin //test pattern for add
+    j:=CBase+0*BigNumSize32+i;
+    rData.Ints[j]:=(i)<<0;
+  end;
+
+  {C1}for i:=0 to BigNumSize24-1 do begin //test pattern for mul
+    k:=i*3+2;
+    j:=(CBase+1*BigNumSize32)+k div 4;
+    rData.Ints[j]:=rData.Ints[j] or 1 shl ((k mod 4)*8);
+  end;
+{  for i:=0 to BigNumSize32-1 do begin //test pattern for mul
+    j:=CBase+1*BigNumSize32+i;
+    rData.Ints[j]:=not rData.Ints[j];
+  end;//negate}
+
+  RandSeed:=19691003;
+  {C2}for i:=0 to BigNumSize32-1 do begin //test pattern for add
+    j:=CBase+2*BigNumSize32+i;
+    Random(1);
+    rData.Ints[j]:=RandSeed;
+  end;*)
+
+{  setc(0,2/WinWidth); //step
+  setc(1,-1.5);   //x0
+  setc(2,-1);    //y0}
+
+//  rData.Ints[CBase+BigNumSize32-1-1]:=$60000000;
+  rData.Ints[CBase+BigNumSize32-1]:=2;
+  setc(1,0);   //x0
+  setc(2,0);   //y0
+
+  rData.IntVArray:=(
+    BlockCnt,             JobCnt,         MaxIter,        WinWidth,
+    KBase*4,              CBase*4,        JBase*4,        ThreadCnt*4,
+    BignumSize32*4,       BlockWidth32*4, MBase*4,        BignumSize32*ThreadCnt*4,
+    BailValue*$100,       DBase*4,        0{IterCnt},     0{JobId},
+//K constants
+    $100, $1234
+    );
+
+  with Module.RunGrid(ThreadCnt,1,0) do begin
+    if Success then begin
+      DumpFCUData(rData);
+      DisplayBitmap(rData.ExportBitmap(JBase*4,WinWidth,WinHeight,32));
+    end else writeLn('FAIL');
+    writeln('elapsed:',ElapsedTime_sec);
+    Free;
+  end;
+end;
+
+Test;

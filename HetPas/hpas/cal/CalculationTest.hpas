@@ -1,0 +1,35 @@
+var i,j,k;
+
+var dev:=cal.devices[0];
+dev.activate;
+writeln(dev.dump);
+
+var module:=dev.Context.NewModule(fileread('e8_013467ABD.preil'));
+writeln(module.disasm);
+
+var rCB0:=dev.NewResource(rlPinned,4,50,0);
+module['cb0']:=rCB0;
+
+var rGlobal:=dev.NewResource(rlPinned,4,50,1);
+module['g[]']:=rGlobal;
+
+const
+  errorMark:=$89342855,
+  desiredval:=$A1EB6D51;
+
+rCB0.IntVArray:=($06473232,$ABC47382,$47823FE3,$0,desiredval,errorMark);
+rGlobal.IntVArray:=(0,0,$1234,$5678);
+
+writeln('Desired output: A1EB6D51 EA017E53 00001234 00005678');
+
+with Module.Run(8192,8192,0) do begin
+  WaitFor(false);
+  if Success then begin
+    for i:=0 to 3 do writeLn(format('%.8x',rGlobal.Ints[i]),' ');
+    if rGlobal.Ints[3]=errorMark then writeln('!!!!!error marked!!!!!');
+    if rGlobal.Ints[3]<>$5678 then writeln('!!!!!garbage in result!!!!!');
+  end else writeLn('FAIL');
+
+  writeln('elapsed:',ElapsedTime_sec);
+  Free;
+end;

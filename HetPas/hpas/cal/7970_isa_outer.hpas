@@ -1,0 +1,142 @@
+const loopsize:=5**2;  //csak 25x a jo!!!!!
+var kernel:=asm_isa(
+  isa79xx
+  numVGprs 64
+  numSgprs 105
+  cb0size  128
+;  userElements[0]    = IMM_UAV, 0, s[4:7]
+;  userElements[1]    = IMM_CONST_BUFFER, 0, s[8:11]
+;  userElements[2]    = IMM_CONST_BUFFER, 18, s[12:15] //kernel parameters
+  v_mad_u32_u24 v0, s16, 64, v0  //WorkGroupIdx*64+WorkItemIdx
+;----------------------------------- v0:absTIdFlat
+  //loopsize:25
+  s_mov_b32     s29, $51eb851f
+  v_mul_hi_u32  v1, v0, s29
+  v_lshrrev_b32  v1, 7, v1
+  s_movk_i32    s29, 0xfe70
+  v_mad_i32_i24  v0, v1, s29, v0
+;----------------------------------- v0: TIdX  v1:TIdY
+  s_buffer_load_dwordx4  s[16:19], s[4:7], 0x00 //D0..D3
+  v_lshlrev_b32  v2, 6, v1
+  v_mul_hi_i32_i24  v3, 0xA3D71, v2
+  s_movk_i32  s29, -6400
+  v_mad_i32_i24  v2, v3, s29, v2
+  s_mov_b32 s29, 0x666667
+  v_mul_hi_i32_i24  v4, s29, v2
+  s_mov_b32 s29, -640
+  v_mad_i32_i24  v2, v4, s29, v2
+  s_mov_b32  s29, 0x1999999A
+  v_mul_hi_u32  v5, v3, s29
+  v_mad_i32_i24  v3, v5, -10, v3
+  s_waitcnt     lgkmcnt(0)
+  v_mov_b32 v6, $400
+  v_mad_u32_u24  v2, v2, v6, s16   \v_readlane_b32 s0, v2, 0
+  v_mov_b32 v6, $10000
+  v_mad_u32_u24  v4, v4, v6, s17   \v_readlane_b32 s1, v4, 0
+  v_mad_u32_u24  v3, v3, v6, s18   \v_readlane_b32 s2, v3, 0
+  v_mad_u32_u24  v5, v5, v6, s19   \v_readlane_b32 s3, v5, 0
+//------------------------------------- D0..D3: S0..S3
+
+loop:
+  //s0..s3: D0..D3 (+TIdY)
+  //s4..s7: UAV0
+  //s8..s88: 81 precalculated thing  (out of 105)
+  //s89..s104: 16 constants
+  //v0,v1: TIdx, TIdy
+  //v2..v5: W0..W3 destroyable
+  //v2..v63: 62 regs workarea
+
+  s_waitcnt     0x0000   //ez nemtom miert kell
+  v_lshlrev_b32  v6, 6, v0
+  v_mul_hi_i32_i24  v7, 0xA3D71, v6
+  s_movk_i32 s29,-6400
+  v_mad_i32_i24  v6, v7, s29, v6
+  v_mul_hi_i32_i24  v8, 0x666667, v6
+  s_movk_i32 s29,-640
+  v_mad_i32_i24  v6, v8, s29, v6
+  v_lshlrev_b32  v7, 6, v7
+  v_mul_hi_i32_i24  v9, 0x666667, v7
+  v_mad_i32_i24  v7, v9, s29, v7
+
+  v_lshlrev_b32  v2, 18, v6     \v_or_b32  v2, s0, v2
+  v_lshlrev_b32  v3, 24, v8     \v_or_b32  v3, s1, v3
+  v_lshlrev_b32  v4, 18, v7     \v_or_b32  v4, s2, v4
+  v_lshlrev_b32  v5, 24, v9     \v_or_b32  v5, s3, v5
+//------------------------------------ W0..W3: V2..V5
+
+  s_mov_b64     s[24:25], exec
+  v_cmp_eq_i32  vcc, 9999 , v0
+  s_and_b64     exec, exec, vcc
+  s_cbranch_execz  label_0051
+    v_add_i32  v14, vcc, 128, v1
+    v_lshlrev_b32  v14, 4, v14
+    tbuffer_store_format_xyzw  v[2:5], v14, s[4:7], 0 offen format:[BUF_DATA_FORMAT_32_32_32_32,BUF_NUM_FORMAT_FLOAT] // 0000013C: EBF71000 80010F0E
+label_0051:
+  s_mov_b64     exec, s[24:25]
+
+//  s_mov_b64     s[24:25], exec
+  v_cmp_eq_i32  vcc, 9999, v1
+  s_and_b64  exec, exec, vcc
+  s_cbranch_execz  label_005D
+    v_add_i32  v10, vcc, 10128, v0
+    v_lshlrev_b32  v10, 4, v10
+  tbuffer_store_format_xyzw  v[2:5], v10, s[4:7], 0 offen format:[BUF_DATA_FORMAT_32_32_32_32,BUF_NUM_FORMAT_FLOAT] // 0000016C: EBF71000 80010F0A
+label_005D:
+  s_mov_b64     exec, s[24:25]
+
+  v_add_i32     v0, vcc, 400, v0
+  v_readlane_b32 s29, v0, 0
+  s_cmpk_ge_i32 s29, 10000
+  s_cbranch_scc0 loop
+  s_endpgm
+);
+
+var i,j,k,dev:=cal.devices[0];
+dev.activate;
+writeln(dev.dump);
+
+var module:=dev.Context.NewModule(kernel);
+writeln(module.disasm);
+
+var rCB0:=dev.NewResource(rlLocal,4,128,0);
+module['cb0']:=rCB0;
+{rCB0.IntVArray:=($01020304,$05060708,$09050102,$03040500,
+                 $64422513,$74556200,$E08C96DD,        0);}
+{rCB0.IntVArray:=($00000304,$00000708,$00000102,$00000500,
+                 $64422513,$74556200,$E08C96DD,$FFFFFFFF);}
+
+var rGlobal:=dev.NewResource(rlPinned,1,20128*4,0);
+rGlobal.IntVArray:=($00000304,$00000708,$00000102,$00000500,
+                    $64422513,$74556200,$E08C96DD,$FFFFFFFF);
+
+
+module['uav0']:=rGlobal;
+
+with Module.RunGrid(int(1e8)div LoopSize,1,0)do begin Success;free end;
+with Module.RunGrid(int(1e8)div LoopSize,1,0)do begin Success;free end;
+with Module.RunGrid(int(1e8)div LoopSize,1,0)do begin Success;free end;
+with Module.RunGrid(int(1e8)div LoopSize,1,0) do begin
+  if Success then begin
+    for i:=0 to 19999+128 do begin
+      write(format('%.4d:  ',i));
+      for j:=0 to 3 do write(format('%.8x ',rGlobal.Ints[i<<2+j]));
+      writeln;
+    end;
+  end else writeLn('FAIL');
+
+  writeln('elapsed:',ElapsedTime_sec);
+  Free;
+end;
+
+//counter check
+var counterError:=((-1,-1,-1,-1),(-1,-1,-1,-1));
+k:=1;
+for j:=0 to 3 do begin
+  for i:=0 to 9999 do begin
+    if rGlobal.Ints[i<<2+j+  128*4]shr 16 and $FF<>(i div k mod 10)then counterError[0][j]:=i;
+    if rGlobal.Ints[i<<2+j+10128*4]shr 24 and $FF<>(i div k mod 10)then counterError[1][j]:=i;
+  end;
+  k:=k*10;
+end;
+
+writeln('counterError (-1:OK):'&counterError);

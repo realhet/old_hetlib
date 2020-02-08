@@ -1,0 +1,72 @@
+const loopsize:=25;
+var i,j,k;
+
+for var numVGprs:=16 to 256 step 16 do
+begin
+  var kernel:=asm_isa(
+    isa79xx
+    NumVgprs ![numVGprs]
+    NumSgprs 105
+    cb0size 1
+    s_mov_b32 s10,![loopsize-1]
+  label_1:);
+
+  for i:=1 to 128  do kernel+=asm_isa(
+    v_mad_i32_i24 v0,v0,v1,v2
+    s_mul_i32 s0,12345,s1
+    v_mad_i32_i24 v0,v0,v1,v2
+    s_mul_i32 s0,12345,s1
+    v_mad_i32_i24 v0,v0,v1,v2
+    s_mul_i32 s0,12345,s1
+    v_mad_i32_i24 v0,v0,v1,v2
+    s_mul_i32 s0,12345,s1
+
+//    s_mul_i32 s0,12345,s1
+//    s_mul_i32 s0,s0,s1
+//    v_xor_b32 v0,v0,v1
+//    v_mad_i32_i24 v0,v0,v1,v2
+//    s_mul_i32 s0,s0,s1
+//    s_xor_b64 s0,s0,s1
+  );
+
+  kernel+=asm_isa(
+    s_add_u32 s10,s10,-1
+    s_cbranch_scc1 label_1
+
+    s_endpgm);
+
+  var dev:=cal.devices[0];
+
+  var module:=dev.Context.NewModule(kernel);
+//  writeln(module.disasm);
+
+  var rCB0:=dev.NewResource(rlPinned,4,64,0);
+  module['cb0']:=rCB0;
+  rCB0.IntVArray:=($55555555,$AAAAAAAA,$00FFF00F0,0,1,$AAAAAAAA,$00FFF00F0,0);
+
+  var rGlobal:=dev.NewResource(rlPinned,1,4*12500,0);
+  module['uav0']:=rGlobal;
+  rGlobal.IntVArray:=(1,2,3,4,5,6,7,8);
+
+const ReferenceTime:=1.9198;
+
+  for i:=0 to 1 do with Module.RunGrid(int(1e8)*10 div loopsize,1,0) do begin
+    if Success then {for var i:=0 to 255 do writeln(format('%.8x',rGlobal.Ints[i]),' ')}
+               else writeLn('FAIL');
+
+    if i=1 then
+      writeln(format('%10.5f',{numVGprs,}ElapsedTime_sec));
+
+    Free;
+  end;
+{  for i:=0 to 1 do with Module.RunGrid(int(1e8)*10 div loopsize,1,0) do begin
+    if not Success then writeln('Fail');
+
+    writeln(format('%4d %10.5f',numVGprs,ElapsedTime_sec));
+    Free;
+  end;}
+
+{  module.free;
+  rCB0.free;
+  rGlobal.free;}
+end;

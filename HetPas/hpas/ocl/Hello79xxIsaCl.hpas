@@ -1,0 +1,40 @@
+#define groupsize 256
+
+const code:=asm_isa(
+  isa79xx  numVgprs 64  numSgprs 64  numThreadPerGroup groupsize  oclBuffers 1,0  ldsSize 0
+  s_mulk_i32    s12, groupsize
+  v_add_i32     v0, vcc, s12, v0           //v0: global threadId
+  s_buffer_load_dword  s0, s[8:11], 0x00   //s0: uav offset
+  s_waitcnt     lgkmcnt(0)
+  v_mad_u32_u24 v2, v0, 4, s0  //address
+  v_mov_b32     v3, v0         //value
+  tbuffer_store_format_x  v3, v2, s[4:7], 0 offen offset:0 format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT]
+  s_endpgm
+);
+
+const WorkCount:=1536;
+var i,j,k;
+
+//find a cl device
+var dev:=cl.devices[0];
+writeln(dev.dump);
+
+//compile kernel
+var kernel:=dev.NewKernel(code);
+writeln(kernel.ISACode);
+
+//allocate buffer
+var uav:=dev.NewBuffer('rw',WorkCount*4);
+
+//run kernel
+var ev:=kernel.run(1024,uav);
+ev.waitfor;
+writeln('elapsed: '&format('%.3f',ev.elapsedtime_sec*1000)&' ms');
+
+//write buffer
+with uav do for i:=0 to WorkCount-1 do
+  writeln(format('%6x: %.8x %10d %10f',i,Ints[i],Ints[i],Floats[i]));
+
+//free up stuff
+uav.free;
+kernel.free;

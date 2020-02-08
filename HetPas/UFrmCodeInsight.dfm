@@ -1,0 +1,30 @@
+object FrmCodeInsight: TFrmCodeInsight
+  Left = 0
+  Top = 0
+  BorderStyle = bsNone
+  Caption = 'FrmCodeInsight'
+  ClientHeight = 100
+  ClientWidth = 301
+  Color = clBtnFace
+  Font.Charset = DEFAULT_CHARSET
+  Font.Color = clWindowText
+  Font.Height = -11
+  Font.Name = 'Tahoma'
+  Font.Style = []
+  FormStyle = fsStayOnTop
+  OldCreateOrder = False
+  OnDeactivate = FormDeactivate
+  PixelsPerInch = 96
+  TextHeight = 13
+  object lb: TListBox
+    Left = 1
+    Top = 1
+    Width = 299
+    Height = 98
+    BorderStyle = bsNone
+    ItemHeight = 13
+    TabOrder = 0
+    OnKeyDown = lbKeyDown
+    OnKeyPress = lbKeyPress
+  end
+end

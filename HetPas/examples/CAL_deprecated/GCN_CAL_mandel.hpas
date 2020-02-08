@@ -1,0 +1,201 @@
+//!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+//Important note for CAL
+//On hd7970  this needs the 11-12_amd_radeon_hd7900_win7_64 driver (or 12-2 on linux)
+//Otherwise the kernel will freeze
+
+////////////////////////////////////////////////////////////
+//   SP Mandel                                            //
+////////////////////////////////////////////////////////////
+
+var kernel:=asm_isa(
+  isa79xx \ numVGprs 84 \ numSgprs 105 \ cb0size  128
+
+  alias UAV0=s[4:7], CB0=s[8:11], ThreadGroupId=s16, ThreadId=v0
+  v_mad_i32_i24 ThreadId, ThreadGroupId, 64, ThreadId
+
+  ; load parameters
+  s_buffer_load_dwordx8 s[32:3], CB0, 0x00
+  s_waitcnt lgkmcnt(0)
+  alias maxIter=s32, winWidth=s33, JobCnt=s34
+  alias CxBase=s36, CyBase=s37, Step=s38
+  alias JobId=v6, X=v7, Y=v8, Y2=v9, Iter=v10, Cx=v11, Cy=v12, halfCy=v13
+  alias XOld=v14, YOld=v15, IterOld=v16
+  ; v0..v5: temp
+
+  s_xor_b64 exec, exec, exec //Active threads: none at start
+  @JobLoop:
+    ; fetch new jobs if exec<>-1
+    s_not_b64 vcc, exec
+    s_cbranch_vccz @SkipFetch
+      ; save exec
+      s_mov_b64   s[0:1], exec    //save active jobs
+      s_mov_b64   exec, vcc
+      ; get next jobs
+      v_mov_b32   v1, 0 ;address
+      v_mov_b32   v2, 1 ;increment
+      buffer_atomic_add  v2, v1, UAV0, 0 offen glc
+      s_waitcnt   vmcnt(0)
+      ; check JobCount
+      v_cmp_gt_i32  vcc, JobCnt, v2 \ s_mov_b64   exec, vcc
+      ; initialize new jobs
+      s_cbranch_execz @SkipInitJob
+        v_mov_b32   JobId, v2
+        ; calculate window coordinates
+        v_cvt_f32_i32   v0, JobId
+        v_cvt_f32_i32   v1, winWidth
+        v_rcp_f32       v1, v1
+        v_mul_f32       v0, v1, v0
+        v_cvt_flr_i32_f32  Y, v0
+        v_mul_lo_u32    v0, winWidth, Y
+        v_sub_i32       X, vcc, JobId, v0
+        ; calc mandelbrot C
+        v_mov_b32       v0, Step
+        v_cvt_f32_i32   X, X
+        v_mad_f32       Cx, v0, X, CxBase
+        v_cvt_f32_i32   Y, Y
+        v_mad_f32       Cy, v0, Y, CyBase
+        v_mul_f32       halfCy, 0.5, Cy
+        ; clear variables
+        v_sub_i32       Iter, vcc, 0, maxIter vop3   ; will be checked for overflow
+        v_mov_b32       X, 0
+        v_mov_b32       Y, 0
+        ;-------------------------------------------
+      @SkipInitJob:
+      s_or_b64    exec, exec, s[0:1]    ; combine new jobs with existing jobs
+      s_cbranch_execz @End              ; exit if nothing to do  (also _scc0 is ok)
+    @SkipFetch:
+    ;------------------------------------ do the jobs here
+    @JobBig:  //6x unroll: 4.37->2.71 ms, 61% speedup. 6x unroll is too much for single precision
+      v_mov_b32   XOld, X
+      v_mov_b32   YOld, Y
+      v_mov_b32   IterOld, Iter
+      ; Y and Y2 alternates across 2 iterations
+      v_mul_f32   v0, X, X
+      v_mad_f32   Y2, X, Y, halfCy mul:2         ; yn=2xy+Cy
+      v_mad_f32   X, Y, Y, -v0
+      v_add_f32   X, -X, Cx                      ; xn=x^2-y^2+Cx
+
+      v_mul_f32   v0, X, X
+      v_mad_f32   Y, X, Y2, halfCy mul:2         ; yn=2xy+Cy
+      v_mad_f32   X, Y2, Y2, -v0
+      v_add_f32   X, -X, Cx                      ; xn=x^2-y^2+Cx
+
+      v_mul_f32   v0, X, X
+      v_mad_f32   Y2, X, Y, halfCy mul:2         ; yn=2xy+Cy
+      v_mad_f32   X, Y, Y, -v0
+      v_add_f32   X, -X, Cx                      ; xn=x^2-y^2+Cx
+
+      v_mul_f32   v0, X, X
+      v_mad_f32   Y, X, Y2, halfCy mul:2         ; yn=2xy+Cy
+      v_mad_f32   X, Y2, Y2, -v0
+      v_add_f32   X, -X, Cx                      ; xn=x^2-y^2+Cx
+
+      v_mul_f32   v0, X, X
+      v_mad_f32   Y2, X, Y, halfCy mul:2         ; yn=2xy+Cy
+      v_mad_f32   X, Y, Y, -v0
+      v_add_f32   X, -X, Cx                      ; xn=x^2-y^2+Cx
+
+      v_mul_f32   v0, X, X
+      v_mad_f32   Y, X, Y2, halfCy mul:2         ; yn=2xy+Cy
+      v_mad_f32   X, Y2, Y2, -v0
+      v_add_f32   X, -X, Cx                      ; xn=x^2-y^2+Cx
+
+      v_mad_f32   v0, Y2, Y2, v0                ; magn=x^2+y^2
+      v_cmp_le_f32 s[0:1], 4.0, v0              ; bailout test
+      v_add_i32   Iter, vcc, 6, Iter            ; check maximum iterations too
+      s_or_b64    vcc, vcc, s[0:1]              ; vcc: finished bits
+    s_cbranch_vccz @JobBig                      ; loop until we have a finished job
+    v_mov_b32   X, XOld
+    v_mov_b32   Y, YOld
+    v_mov_b32   Iter, IterOld
+    @JobSmall:
+      v_mul_f32   v0, X, X
+      v_mul_f32   v1, Y, Y
+      v_mad_f32   Y, X, Y, halfCy mul:2         ; yn=2xy+Cy
+      v_sub_f32   X, v0, v1
+      v_add_f32   X, X, Cx                      ; xn=x^2-y^2+Cx
+      v_add_f32   v0, v0, v1                    ; magn=x^2+y^2
+      v_cmp_le_f32 s[0:1], 4.0, v0              ; bailout test
+      v_add_i32   Iter, vcc, 1, Iter            ; check maximum iterations too
+      s_or_b64    vcc, vcc, s[0:1]              ; vcc: finished bits
+    s_cbranch_vccz @JobSmall                    ; loop until we have a finished job
+    ;------------------------------------ some jobs are finished: bits set in vcc
+    s_andn2_b64 s[0:1], exec, vcc               ; s0: exec mask after finishing some jobs
+    s_mov_b64 exec, vcc                         ; exec: finished jobs
+    ;------------------------------------ write the result
+    v_add_i32 Iter, vcc, maxIter, Iter          ; correction
+
+    v_mul_f32   v0, X, X
+    v_mad_f32   v0, Y, Y, v0
+    v_log_f32   v0, v0
+    v_log_f32   v0, v0
+    v_sub_f32   v0, 1.0, v0                     ;smooth coloring:  1-log2(log2((xx*xx+yy*yy)))
+
+    v_cvt_f32_u32 v1, Iter
+    v_add_f32     v0, v0, v1                    ;v0: smooth iteration count
+
+    v_mov_b32 v2, 128.0
+    v_mul_f32 v1, 0.0102164, v0 \ v_cos_f32 v1, v1 \ v_mad_f32 v1, v1, v2, v2 \ v_cvt_pk_u8_f32 v4, v1, 0, 0
+    v_mul_f32 v1, 0.0123564, v0 \ v_sin_f32 v1, v1 \ v_mad_f32 v1, v1, v2, v2 \ v_cvt_pk_u8_f32 v4, v1, 1, v4
+    v_mul_f32 v1, 0.0121842, v0 \ v_sin_f32 v1, v1 \ v_mad_f32 v1, v1, v2, v2 \ v_cvt_pk_u8_f32 v4, v1, 2, v4
+
+    v_mad_i32_i24 v0, JobId, 4, 16              ; address calc
+    tbuffer_store_format_x  v4, v0, UAV0, 0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT]
+
+    s_mov_b64 exec, s[0:1]                    ; set the updated exec mask
+  s_branch @JobLoop
+  @End:
+  s_endpgm
+);
+
+procedure Test;
+var i,j,k;
+const
+  W:=500, H:=500;
+begin
+  var dev:=cal.devices[0];
+//  dev.activate;writeln(dev.dump);
+
+  var module:=dev.Context.NewModule(kernel);
+//  writeln(module.disasm);
+
+  with var rCB0:=dev.NewResource(rlLocal,4,128,0)do begin
+    Ints[0]:=1e5;      //maxiter
+    Ints[1]:=W;        //window_width
+    Ints[2]:=W*H;      //Job count
+    Floats[4]:=-0.5;   //cx base
+    Floats[5]:=-0;     //cy base
+
+    Floats[4]:=-0.13856524454488;  //centerx
+    Floats[5]:=-0.64935990748190;  //centery
+
+    Floats[6]:=0.001;    //step
+    Floats[4]-=Floats[6]*W/2;
+    Floats[5]-=Floats[6]*H/2;
+  end;
+  module['cb0']:=rCB0;
+
+  var rGlobal:=dev.NewResource(rlPinned,1,4+1024*1024,0);
+  module['uav0']:=rGlobal;
+  rGlobal.Ints[0]:=0;  //job id
+
+  with Module.RunGrid(2048*4*3,1,0) do begin
+    if Success then begin
+      for i:=0 to 511 do begin
+//        write(format('%.4d:  ',i));
+//        for j:=0 to 3 do write(format('%.8x ',rGlobal.Ints[i<<2+j]));
+//        for j:=0 to 3 do write(format('%8.4f ',rGlobal.Floats[i<<2+j]));
+//        writeln;
+      end;
+
+      DisplayBitmap(rGlobal.ExportBitmap(16,W,H,32));
+
+    end else writeLn('FAIL');
+
+    writeln('elapsed:',ElapsedTime_sec);
+    Free;
+  end;
+end;
+
+
+Test;

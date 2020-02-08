@@ -1,0 +1,84 @@
+var code:=asm_isa(
+  isa79xx
+  numVGprs 64
+  numSgprs 104
+  cb0size  128
+  ldssize  128
+
+  oclBuffers 1,0  alias uav=s[4:7], uavofs=s[8:11]
+  s_buffer_load_dword  s0, uavofs, 0x00  //s0: uav offset
+  s_waitcnt lgkmcnt(0)
+
+  s_mov_b32 s8,$FFFFFFFF //minimum ticks       //ruins cb0 res const
+  s_mov_b32 s9,156      //iteration count     //ruins cb0 res const
+  @loop:
+    s_memtime s[12:13]
+    s_waitcnt lgkmcnt(0)
+;--------- test code begin ----------------------------
+
+{this example shows that if you use an s_ instruction
+after a v_ instruction that writes S regs, it will
+have +4 cycle latency}
+
+#macro pattern
+
+//  6cycles
+//  v_cmp_lg_f32 vcc, v55,v55
+//  s_add_i32  s55, s55, s55
+
+    s_add_i32 s55, s56, s57
+    v_xor_b32 v54, src_lds_direct, v58
+    s_add_i32 s55, s56, s57
+    v_xor_b32 v54, src_lds_direct, v58
+#endm
+
+__for__(i in [1..100],pattern)
+
+;--------- end of test code ---------------------------
+    s_memtime s[14:15]   //ruins kernel params
+    s_waitcnt lgkmcnt(0)
+    s_sub_u32 s14, s14, s12
+    s_min_u32 s8, s8, s14
+    s_sub_u32 s9,s9,1
+  s_cbranch_scc0 @loop
+
+  s_mov_b32 exec_hi,0
+  s_mov_b32 exec_lo,1
+  s_sub_i32 s8,s8,$1C //s_wait cost
+  s_lshr_b32 s8,s8,2  //1clk = 4cycles
+  v_mov_b32 v0, s8//mintime
+  v_mov_b32 v1, s0//addr
+  buffer_atomic_umin v0, v1, s[4:7], 0 offen
+
+  s_endpgm
+);
+
+//find a device
+function FindGCNDevice;
+begin
+  for var d in cl.devices where d.Info.TargetSeries>=7 do exit(d);
+  raise exception.create("No GCN device found");
+end;
+
+var dev:=FindGCNDevice;; writeln(dev.dump);
+
+//compile kernel
+var kernel:=dev.NewKernel(code);writeln(kernel.ISACode);  //show disasm
+
+//allocate buffer
+var uav:=dev.NewBuffer('rw',1024);
+uav.ints[0]:=$FFFFFFFF;
+
+//run kernel
+var ev:=kernel.run($10000,uav);
+ev.waitfor;
+writeln('elapsed: '&format('%.3f',ev.elapsedtime_sec*1000)&' ms');
+ev.free;
+
+//display results
+writeln('Cycles (including latency): '&uav.ints[0]);
+
+//free up stuff
+uav.free;
+kernel.free;
+

@@ -1,0 +1,49 @@
+#define something               //just define it, equals ""
+
+#define add(a,b) ((a)+(b))      //define a simple macro
+#define add(a,b,c) ((a)+(b)+(c))//overload it with 3 parameters
+
+#define multiline 1+  \
+                  2             //multiline macro
+
+{#define multiline2 1+
+                    2 }         //another form of multiline macro
+
+#macro ensureRange(x, min, max) //multiline macro, best syntax
+  if(x<min)then
+    x:=min
+  else if(x>max)then
+    x:=max;
+#endm
+
+#assign two 1+1                 //'assign' evaluates the expression
+
+#undef something                //undefine an existing macro
+
+var x:=-0;                      //test some of the macroes
+ensureRange(x,1,5);
+writeln(x, ',', add(1,2,3), ',', two);    //the output should be 1,6,2
+
+
+
+writeln(__file__, __line__, __date__, __time__);
+
+
+#define a
+__ifdef__(a, writeln('a is defined'));
+__ifndef__(b, writeln('b is undefined'));
+#define a 15
+__if__(a>=10, writeln('a>=10'));
+
+__for__(i in [1, 2, 5..8], write(i); ) //125678
+__for__(i:=1 to 8 where i not in [3, 4], write(i); ) //125678
+__for__(i:=1 to 8 step 2, write(i); ) //1357
+
+{#script writeln('writeln("this is scripted");');}
+
+writeln(__file__);
+#include include.inc
+writeln(__file__,__line__);
+
+writeln(asm_isa(This code is displayed in !["GCN"+" ISA"] syntax s_endpgm));
+//output is: This code is displayed in GCN ISA syntax s_endpgm

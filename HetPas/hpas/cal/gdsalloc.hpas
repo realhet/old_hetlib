@@ -1,0 +1,42 @@
+var il_kernel:=asm_il(il_cs_2_0
+  dcl_num_thread_per_group 256,1,1
+{ erre alakitja az a ClCompatible
+  dcl_cb cb0[10]   ; Constant buffer that holds ABI data
+  dcl_cb cb1[2]    ; kernel arg setup
+  dcl_cb cb2[4096] ; actual constant buffer, 64K??? wtf}
+
+  dcl_cb cb0[32]        ; actual constant buffer, 64K??? wtf
+//  dcl_typeless_uav_id(10)_stride(4)_length(4)_access(read_write)
+  dcl_raw_uav_id(10)
+
+  dcl_gds_id(0) 512
+
+  dcl_literal l1, 2, 0, 0, 0
+  mov r0.x,vAbsTIdFlat          ; get_global_id(0)
+  ishl r0.y, r0.x, l1.x         ; r0.y addr
+  ixor r0.x, r0.x, cb2[0].x     ; get_global_id(0) ^ cb[0]
+//  iadd r0.x, r0.x, $1000
+
+  //fake: ezek amiatt kellenek, hogy ki ne optimizalja a cb0-t meg a cb1-t
+  iadd r1.x, cb0[0].x, cb1[0].x
+  iand r1.x, r1.x, cb2[0].y
+  iadd r0.x, r0.x, r1.x
+
+  gds_add_id(0) r0.x,r0.x   //GDS TEST!!!!!
+
+  iadd r0.x,r0.x,r0.x
+
+  uav_raw_store_id(0) mem.x, r0.y, r0.x
+  endmain
+  end
+);
+
+var dev:=cal.devices[0];
+dev.activate;
+//writeln(dev.dump);
+//compile
+//var isa:=cal.CompileIL(il_kernel,dev.target,true,true);
+
+//--------------- test on CAL
+var module:=dev.Context.NewModule(il_kernel);
+writeln(module.disasm);

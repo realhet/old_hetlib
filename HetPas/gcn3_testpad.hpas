@@ -1,0 +1,112 @@
+#define WorkGroupSize 256
+
+var skeleton:='__kernel __attribute__((reqd_work_group_size('&WorkGroupSize&',1,1))) void main(__global uint* a) { a[get_global_id(0)*1]=999; }';
+
+{//compiled by ocl GCN1
+  s_buffer_load_dword  s0, s[8:11], 0x18                    // 00000000: C2000918
+  s_buffer_load_dword  s1, s[12:15], 0x00                   // 00000004: C2008D00
+  s_lshl_b32    s2, s16, 8                                  // 00000008: 8F028810
+  s_waitcnt     lgkmcnt(0)                                  // 0000000C: BF8C007F
+  s_add_u32     s0, s2, s0                                  // 00000010: 80000002
+  v_add_i32     v0, vcc, s0, v0                             // 00000014: 4A000000
+  v_lshlrev_b32  v0, 2, v0                                  // 00000018: 34000082
+  v_add_i32     v0, vcc, s1, v0                             // 0000001C: 4A000001
+  v_mov_b32     v1, 0x000003e7                              // 00000020: 7E0202FF 000003E7
+  tbuffer_store_format_x  v1, v0, s[4:7], 0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT] // 00000028: EBA41000 80010100
+  s_endpgm
+}
+{//compiled by ocl GCN3
+  s_buffer_load_dword  s0, s[8:11], 0x60                // 000000000000: C0220004 00000060
+  s_buffer_load_dword  s1, s[12:15], 0x00               // 000000000008: C0220046 00000000
+  s_lshl_b32    s2, s16, 8                              // 000000000010: 8E028810
+  s_waitcnt     lgkmcnt(0)                              // 000000000014: BF8C007F
+  s_add_u32     s0, s2, s0                              // 000000000018: 80000002
+  v_add_u32     v0, vcc, s0, v0                         // 00000000001C: 32000000
+  v_lshlrev_b32  v0, 2, v0                              // 000000000020: 24000082
+  v_add_u32     v0, vcc, s1, v0                         // 000000000024: 32000001
+  v_mov_b32     v1, 0x000003e7                          // 000000000028: 7E0202FF 000003E7
+  buffer_store_dword  v1, v0, s[4:7], 0 offen           // 000000000030: E0701000 80010100
+  s_endpgm
+}
+
+
+var code:=asm_isa(
+  isa79xx   numsgprs 40   numvgprs 64
+  s_buffer_load_dword  s0, s[ 8:11], 0x60 ofsByte       // 000000000000: C0220004 00000060
+  s_buffer_load_dword  s1, s[12:15], 0x00 ofsByte       // 000000000008: C0220046 00000000
+  s_lshl_b32    s2, s16, 8                              // 000000000010: 8E028810
+  s_waitcnt     lgkmcnt(0)                              // 000000000014: BF8C007F
+  s_add_u32     s0, s2, s0                              // 000000000018: 80000002
+  v_add_u32     v0, vcc, s0, v0                         // 00000000001C: 32000000
+  v_lshlrev_b32  v0, 2, v0                              // 000000000020: 24000082
+  v_add_u32     v0, vcc, s1, v0                         // 000000000024: 32000001
+  v_mov_b32     v1, 0x12345678                          // 000000000028: 7E0202FF 000003E7
+  buffer_store_dword  v1, v0, s[4:7], 0 offen           // 000000000030: E0701000 80010100
+//  s_endpgm
+
+  alias scuN[4]=v16
+
+  v_mov_b32 scuN[0], $00000000
+  v_mov_b32 scuN[1], $00000000
+  v_mov_b32 scuN[2], $00000000
+  v_mov_b32 scuN[3], $00000000
+
+
+#macro IGB(srcBitIdx, nIdx, dstBitIdx, bitCnt)
+  //InsertGdiBits
+  //uses IGBsrc as input bits, tmp0 as temp
+  v_bfe_u32 tmp0, IGBsrc, srcbitIdx, bitCnt
+  v_lshlrev_b32 tmp0, dstBitIdx, tmp0
+  v_or_b32 scuN[nIdx], scuN[nIdx], tmp0
+#endm
+
+#macro finalizeScuN
+  //copy 5 bits from N0:16 -> N1:1
+  v_bfe_u32 tmp0, scuN[0], 16, 5
+  v_lshlrev_b32 tmp0, 1, tmp0
+  v_or_b32 scuN[1], scuN[1], tmp0
+  //calculate N3=(N[2] >> 1 ^ N[0]) & 0xFF;
+  v_lshrrev_b32 tmp0, 1, scuN[2]
+  v_xor_b32 tmp0, tmp0, scuN[0]
+  v_and_b32 scuN[3], $ff, tmp0
+#endm
+
+  alias IGBsrc=v10   v_mov_b32 v10, -1
+  alias tmp0=v11
+
+{GPU script:}   IGB(0,0,9,1)  IGB(1,0,11,2)  IGB(3,0,16,1)  IGB(4,0,18,2)  IGB(6,1,8,3)  IGB(9,1,15,2)  IGB(11,2,1,2)  IGB(13,2,6,5)
+  finalizeScuN
+
+
+
+  buffer_store_dwordx4 scuN[0], v0, s[4:7], 0 offen
+
+  s_endpgm
+);
+
+
+
+var dev:=cl.devices[1];
+writeln(dev.dump);
+
+//var kernel:=dev.newKernel(skeleton);
+var kernel:=dev.newKernel(code, skeleton);
+writeln(kernel.ISACode);
+
+//if dev.info.targetSeries=9 then exit;
+
+var buf:=dev.NewBuffer('rw',4096{bytes}); buf.clear;
+var ev:=kernel.run(1,buf);
+ev.waitfor;
+writeln('elapsed: '&format('%.3f',ev.elapsedtime_sec*1000)&' ms');
+ev.free;
+
+//display results
+with buf do for var i:=0 to 3 do
+  writeln(format('%6x: %.8x %10d %10f',i,Ints[i],Ints[i],Floats[i]));
+
+
+with buf do for var i:=0 to 3 do begin
+  for var j:=0 to 31 do write(Ints[i]>>(31-j)and 1 ? '1':'.');
+  writeln;
+end;

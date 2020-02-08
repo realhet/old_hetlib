@@ -1,0 +1,32 @@
+const N:=50;//width=2N height=N
+
+procedure writebyte(b);
+begin
+  for var i:=7 towards 0 do
+    write(b>>i and 1?'#':'.');
+end;
+
+var St:=2.0/n,Cy:=-1;
+for var y:=0 to n-1 do begin
+  var bits:=0,Cx:=-1.5;
+  for var x:=0 to n*2>>3-1 do begin
+    for var xx:=0 to 7 do begin
+
+      var Zr:=0.0,Zi:=0.0,Ti:=0,Tr:=0,iter:=200;
+      repeat
+        Zi*=Zr;Zi+=Zi+Cy;
+        Zr:=Cx+Tr-Ti;
+        Ti:=Zi*Zi;
+        Tr:=Zr*Zr;
+      until(--iter<=0)or(Tr+Ti>=4);
+
+      bits:=bits<<1;
+      if iter<=0 then ++bits;
+
+      Cx+=St*0.5;
+    end;
+    writebyte(bits);
+  end;
+  Cy+=St;
+  writeln;
+end;

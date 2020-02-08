@@ -1,0 +1,120 @@
+#define groupsize 64
+#define WorkCount 4000000
+#define LoopCount 25
+#define instrPerPattern 2
+#define PatternCount 2200
+
+const
+  UseOpenCL:=true,     //otherwise CAL
+  TeraOps:=4000000*1e-12*LoopCount*PatternCount*instrPerPattern;
+
+const code:=asm_isa(
+  isa79xx numVgprs 64  numSgprs 64  numThreadPerGroup groupsize  oclBuffers 1,1  ldsSize 0  cb0size  128
+  s_mulk_i32    s16, groupsize
+  v_add_i32     v0, vcc, s16, v0
+
+  )&(useOpenCL?asm_isa(
+    alias uav=s[4:7], cb=s[12:15], uav_ofs=s[8:11]
+    s_buffer_load_dword  s0, uav_ofs, 0x00
+  ):asm_isa(
+    alias uav=s[4:7], cb=s[8:11]
+    s_mov_b32  s0, 0
+  ))&asm_isa(
+
+  s_buffer_load_dword  s1, cb, 0x00        //s1: secret
+  s_waitcnt     lgkmcnt(0)
+
+  //do a stupid random generator
+  v_mov_b32 v10,v0{seed}  v_mov_b32 v11,1  v_mov_b32 v12,$88405
+  alias i=s20
+  s_movk_i32 i, LoopCount-1
+  @loop:
+
+    #define pattern                      \
+      v_mad_i32_i24 v10, v10, v12, v11   \
+      v_add_i32 v10, vcc, 0, v10
+
+    __for__(i:=1 to PatternCount, pattern)
+
+    s_sub_i32 i, i, 1
+  s_cbranch_scc0 @loop
+
+  //on the first thread: uav[0]:=cb[0]
+  v_cmp_eq_i32  s16, 63, v0
+  s_and_b64 exec, exec, s16
+  s_cbranch_execz @end
+    v_mov_b32 v3,s1  //secret
+    v_mov_b32 v2,s0  //uav addr
+    tbuffer_store_format_x  v3, v2, uav, 0 offen offset:0 format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT]
+  @end:
+  s_endpgm
+);
+
+
+procedure TestOpenCL; var i,j,k;
+begin
+  //find a cl device
+  var dev:=cl.devices[0]; writeln(dev.dump);
+
+  //compile kernel
+  var kernel:=dev.NewKernel(code); writeln(kernel.ISACode);
+//  filewrite('c:\a.a',kernel.ELFImage);
+
+  //allocate buffer
+  var uav:=dev.NewBuffer('rw',64<<10);
+  var cb :=dev.NewBuffer('r' , 4<<10);
+
+  //run kernel
+  var secret:=random($1000000);
+  cb.Ints[0]:=secret;
+  var ev:=kernel.run(WorkCount,uav,cb);
+  ev.waitfor;
+
+  //check result
+  if uav.Ints[0]<>secret then raise Exception.Create('error'*i);
+  writeln('elapsed: '&format('%.3f ms  %.3f TFlops/sec',ev.elapsedtime_sec*1000,2*TeraOps/ev.elapsedtime_sec)&' ms');
+
+  //write buffer
+  with uav do for i:=0 to 15 do writeln(format('%6x: %.8x %10d %10f',i,Ints[i],Ints[i],Floats[i]));
+
+  //free up stuff
+  uav.free;
+  cb.free;
+  kernel.free;
+end;
+
+procedure TestCAL; var i,j,k;
+begin
+  //find a cl device
+  var dev:=cal.devices[0]; writeln(dev.dump);
+
+  //compile module
+  var module:=dev.Context.NewModule(code); writeln(module.disasm);
+
+  //allocate buffer
+  var uav:=dev.NewResource(rlPinned,1,64<<10>>2,0);
+  var cb :=dev.NewResource(rlLocal ,4, 4<<10>>4,0);
+  module['cb0' ]:=cb;
+  module['uav0']:=uav;
+
+  //run module
+  var secret:=random($1000000);
+  cb.Ints[0]:=secret;
+  var ev:=module.runGrid(WorkCount,1,0);
+  ev.waitfor;
+
+  //check result
+  if uav.Ints[0]<>secret then raise Exception.Create('error'*i);
+  writeln('elapsed: '&format('%.3f ms  %.3f TFlops/sec',ev.elapsedtime_sec*1000,2*TeraOps/ev.elapsedtime_sec)&' ms');
+
+  //write buffer
+  with uav do for i:=0 to 15 do writeln(format('%6x: %.8x %10d %10f',i,Ints[i],Ints[i],Floats[i]));
+
+  //free up stuff
+  uav.free;
+  cb.free;
+  module.free;
+end;
+
+if UseOpenCL then TestOpenCL
+             else TestCAL;

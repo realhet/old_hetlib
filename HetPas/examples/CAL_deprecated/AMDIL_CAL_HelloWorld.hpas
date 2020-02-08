@@ -1,0 +1,46 @@
+//!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!//
+//Important note for CAL                                                             //
+//On hd7970  this needs the 11-12_amd_radeon_hd7900_win7_64 driver (or 12-2 on linux)//
+//Otherwise the kernel will freeze                                                   //
+
+const code:=asm_il(
+il_cs_2_0
+dcl_num_thread_per_group 64,1,1
+dcl_cb cb0[1]
+dcl_raw_uav_id(0)
+dcl_literal l1,2,16,0,5
+iadd r0.x,vAbsTid.x,cb0[0].x
+iadd r0.x, r0.x, r3.x
+ishl r2.x,vAbsTid.x, l1.x
+
+uav_raw_load_id(0) r5.x, r2.x
+iadd r5.x, r0.x, r5.x
+
+uav_raw_store_id(0) mem.x, r2.x, r5.x
+end
+);
+
+var dev:=cal.devices[0];
+dev.activate;
+writeln(dev.dump);
+
+var module:=dev.Context.NewModule(code);  //check c:\ folder for generated il/elf files
+writeln(module.disasm);
+
+var rCB0:=dev.NewResource(rlPinned,4,128,0);
+module['cb0']:=rCB0;             //^ components, must be 4 for cb
+rCB0.IntVArray:=(100);
+
+var rGlobal:=dev.NewResource(rlPinned,1,128,1);
+rGlobal.ints[1]:=90000;
+module['uav0']:=rGlobal;            //^ components, must be 1
+
+with Module.RunGrid(8192,8192,0) do begin
+  WaitFor;
+  if Success then for var i:=0 to 7 do write(rGlobal.Ints[i],' ')
+             else writeLn('FAIL');
+  writeln('elapsed:',ElapsedTime_sec);
+  Free;
+end;
+
+//expected output: 100 101 102 103 104 105 106 107

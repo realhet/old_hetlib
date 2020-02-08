@@ -1,0 +1,111 @@
+const loopsize:=25;
+var kernel:=
+'isa79xx
+NumVgprs 64
+NumSgprs 105
+cb0size 1
+
+s_mov_b32 s10,'&(loopsize-1)&'
+label_1:
+';
+
+var i,j,k;
+
+for i:=1 to 75*8  do begin
+kernel+='
+//v_xor_b32     v6, v2, v3  ;F2
+//v_xor_b32     v6, v6, v4  ;F2
+
+;v_bfi_b32   v6,v2,v3,v4        ;F1
+;s_and_b64 s5,s3,s4
+;v_add_i32   v5,vcc,v5,v6       ;F add
+;s_andn2_b64 s5,s3,s4
+;v_alignbit_b32 v6, v1, v1, 27  ;A<<<5
+;v_alignbit_b32 v2, v2, v2, 1
+;s_or_b64 s5,s3,s4
+;v_add_i32   v5,vcc,v6,v5           ;A add
+;v_add_i32   v5,vcc,s5,v5       ;WXK add
+
+v_mad_i32_i24 v0,v0,v1,v2
+s_mul_i32 s0,s0,s1
+v_mad_i32_i24 v0,v0,v2,v3
+s_mul_i32 s0,s0,s1
+//v_and_b32 v0,v0,v1
+v_mad_i32_i24 v0,v0,v4,v5
+v_and_b32 v0,v0,v1
+s_mul_i32 s0,s0,s1
+//v_mad_i32_i24 v0,v0,v5,v6
+v_and_b32 v0,v0,v1
+s_mul_i32 s0,s0,s1
+
+';
+
+//  kernel+='v_add_i32     v1, vcc, v2, v1'#13#10;
+//  kernel+='v_mul_i32_i24  v0, v0, s0'#13#10;
+//  kernel+='v_mul_lo_u32  v0, v0, s0'#13#10;
+//  kernel+='v_mad_i32_i24  v0, v1, 1, s2'#13#10;
+//  kernel+='v_mad_i32_i24  v0, v1, 1, s1'#13#10;
+
+{  kernel+='v_mad_i32_i24     v1, 12, 13, v1'#13#10;
+  kernel+='s_xor_b64     s3, 145, s3'#13#10;
+  kernel+='v_mad_i32_i24     v1, 12, 13, v1'#13#10;
+//  kernel+='s_xor_b64     s3, 145432, s3'#13#10;
+  kernel+='v_mad_i32_i24     v1, 12, 13, v1'#13#10;
+//  kernel+='s_xor_b64     s3, 147896, s3'#13#10;
+  kernel+='v_mad_i32_i24     v1, 12, 13, v1'#13#10;
+  kernel+='s_xor_b64     s3, 15, s3'#13#10;}
+
+{  kernel+='s_xor_b64     s3, 12, s3'#13#10;
+  kernel+='v_xor_b32     v2, 11432, v2'#13#10;
+//  kernel+='s_xor_b64     s2, 45, s2'#13#10;
+  kernel+='v_xor_b32     v3, 12432, v3'#13#10;
+  kernel+='s_xor_b64     s3, 12, s3'#13#10;
+  kernel+='v_xor_b32     v4, 14432, v4'#13#10;}
+//  kernel+='s_xor_b64     s1, 43, s1'#13#10;
+
+//  kernel+='s_xor_b64     s4, s4, s4'#13#10;
+//  kernel+='v_add_i32     v2, vcc, s1, v2'#13#10;
+//  kernel+='v_add_i32     v3, vcc, s1, v3'#13#10;
+//  kernel+='v_xor_b32     v4, s1, v4'#13#10;
+//  kernel+='v_sad_u32 v1,0,s1,v1'#13#10;
+//  kernel+='v_or_b32 v1,s1,v1'#13#10;
+//  kernel+='v_xor_b32 v2,s2,v2'#13#10;
+//  kernel+='v_add_i32     v1, vcc, s1, v1'#13#10;
+//  kernel+='s_mul_i32     s0, 4532, s0'#13#10;
+//  kernel+='s_xor_b64     s2, s2, s0'#13#10;
+//  kernel+='s_xor_b64     s2, s2, s0'#13#10;
+
+
+end;
+
+
+
+kernel+='
+s_add_u32 s10,s10,-1
+s_cbranch_scc1  label_1
+
+s_endpgm';
+
+
+var dev:=cal.devices[0];
+
+var module:=dev.Context.NewModule(kernel);
+writeln(module.disasm);
+
+var rCB0:=dev.NewResource(rlPinned,4,64,0);
+module['cb0']:=rCB0;
+rCB0.IntVArray:=($55555555,$AAAAAAAA,$00FFF00F0,0,1,$AAAAAAAA,$00FFF00F0,0);
+
+var rGlobal:=dev.NewResource(rlPinned,1,4*12500,0);
+module['uav0']:=rGlobal;
+rGlobal.IntVArray:=(1,2,3,4,5,6,7,8);
+
+const ReferenceTime:=1.9198;
+
+for i:=0 to 1 do with Module.RunGrid(int(1e8)*10 div loopsize,1,0) do begin
+  if Success then {for var i:=0 to 255 do writeln(format('%.8x',rGlobal.Ints[i]),' ')}
+             else writeLn('FAIL');
+
+  writeln(format('elapsed:%.5f ratio:%.2f%%',ElapsedTime_sec,(ReferenceTime/ElapsedTime_sec)*100-100));
+  Free;
+end;

@@ -1,0 +1,253 @@
+{      v_mad_f32   Y2, X, Y, halfCy mul:2         ; y'=2xy+Cy
+      v_mad_f32   X2, Y, Y, -Cx
+      v_mad_f32   X2, X, X, -X2                  ; x'=x^2-y^2+Cx
+
+      v_mad_f32   Y, X2, Y2, halfCy mul:2        ; y'=2xy+Cy
+      v_mad_f32   X, Y2, Y2, -Cx
+      v_mad_f32   X, X2, X2, -X                  ; x'=x^2-y^2+Cx}
+
+var kernel:=asm_il(il_cs_2_0
+  dcl_num_thread_per_group 64,1,1
+  dcl_cb cb0[2]
+  dcl_raw_uav_id(0)
+  dcl_lds_id(0) 256
+  dcl_literal l1,1,2,0,0
+  mov r0.x,vAbsTIdFlat
+  ishl r2.x,r0.x,l1.y //addr
+  iadd r1.x,r0.x,l1.x //value
+
+  //lds test
+  call 1
+
+  uav_raw_store_id(0) mem.x, r2.x, r3.x
+  uav_raw_load_id(0)  r4.x, r2.x
+  uav_raw_store_id(0) mem.x, r2.x, r4.x
+
+endmain
+
+  func 1
+    lds_store_id(0) r2.x, r1.x  //ds_write_b32  v1, v0
+    mov r3.x,l1.x
+    {fake out optimizations} iadd r2.x, r2.x, cb0[0].x \ isub r2.x, r2.x, cb0[0].x
+    lds_load_id(0) r3.x, r2.x   //ds_read_b32  v1, v0  //ecceru, mint a fae'k
+  ret
+
+end
+);
+(*
+var kernel:=asm_isa(
+  isa79xx \ numVGprs 64 \ numSgprs 105 \ cb0size  128 \ ldsSize 256
+  alias uav=s[4:7], cb=s[8:11]
+
+  v_lshlrev_b32  v2, 6, v2                                  // 00000000: 34040486
+  v_lshlrev_b32  v1, 6, v1                                  // 00000004: 34020286
+  v_add_i32     v1, vcc, v2, v1                             // 00000008: 4A020302
+  v_add_i32     v0, vcc, v0, v1                             // 0000000C: 4A000300
+  s_mov_b32     m0, 0x00008000                              // 00000010: BEFC03FF 00008000
+  s_buffer_load_dwordx2  s[0:1], s[12:15], 0x00             // 00000018: C2400D00
+  s_waitcnt     lgkmcnt(0)                                  // 0000001C: BF8C007F
+  s_mul_i32     s2, s18, s0                                 // 00000020: 93020012
+  s_mul_i32     s1, s2, s1                                  // 00000024: 93010102
+  s_mul_i32     s0, s17, s0                                 // 00000028: 93000011
+  s_add_i32     s0, s1, s0                                  // 0000002C: 81000001
+  s_add_i32     s0, s16, s0                                 // 00000030: 81000010
+  s_lshl_b32    s0, s0, 6                                   // 00000034: 8F008600
+  v_add_i32     v0, vcc, s0, v0                             // 00000038: 4A000000
+  v_lshlrev_b32  v1, 2, v0                                  // 0000003C: 34020082
+  v_add_i32     v0, vcc, 1, v0                              // 00000040: 4A000081
+  ds_write_b32  v1, v0                                      // 00000044: D8340000 00000001
+  s_buffer_load_dword  s0, s[8:11], 0x00                    // 0000004C: C2000900
+  s_waitcnt     lgkmcnt(0)                                  // 00000050: BF8C007F
+  v_add_i32     v0, vcc, s0, v1                             // 00000054: 4A000200
+  v_subrev_i32  v0, vcc, s0, v0                             // 00000058: 4E000000
+  ds_read_b32   v1, v0                                      // 0000005C: D8D80000 01000000
+  s_waitcnt     lgkmcnt(0)                                  // 00000064: BF8C007F
+  tbuffer_store_format_x  v1, v0, s[4:7], 0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT] // 00000068: EBA41000 80010100
+  s_endpgm                                                  // 00000070: BF810000
+);*)
+
+
+(*kernel:=asm_il(
+  il_cs_2_0
+  dcl_num_thread_per_group 64,1,1
+  dcl_cb cb0[4]
+  dcl_raw_uav_id(0)
+  ;mov r0.x,vAbsTIdFlat
+  dcl_literal l1,1,2,0,0
+  mov r0,cb0[0]
+  mov r1,cb0[1]
+  mov r2,cb0[2]
+  mov r3,cb0[3]
+  uav_raw_store_id(0) mem.xyzw, r0.x,r0
+  uav_raw_store_id(0) mem.xyzw, r0.y,r1
+  uav_raw_store_id(0) mem.xyzw, r0.z,r2
+  uav_raw_store_id(0) mem.xyzw, r0.w,r3
+  endmain
+  end
+);
+
+kernel:=asm_isa(
+  isa79xx
+  NumVgprs 30
+  NumSgprs 64
+  cb0size 4
+
+;  s_buffer_load_dwordx4  s[0:3], s[8:11], 0x00              // 00000000: C2800900
+;  s_buffer_load_dwordx4  s[12:15], s[8:11], 0x04            // 00000004: C2860904
+;  s_buffer_load_dwordx4  s[16:19], s[8:11], 0x08            // 00000008: C2880908
+;  s_buffer_load_dwordx4  s[8:11], s[8:11], 0x0c             // 0000000C: C284090C
+  s_buffer_load_dwordx16  s[32:47], s[8:11], 0x00             // 0000000C: C284090C
+  s_waitcnt     lgkmcnt(0)                                  // 00000010: BF8C007F
+  v_mov_b32     v1, s32                                     // 00000014: 7E020200
+  v_mov_b32     v2, s33                                     // 00000018: 7E040201
+  v_mov_b32     v3, s34                                     // 0000001C: 7E060202
+  v_mov_b32     v4, s35                                     // 00000020: 7E080203
+  tbuffer_store_format_xyzw  v[1:4], v1, s[4:7], 0 offen format:[BUF_DATA_FORMAT_32_32_32_32,BUF_NUM_FORMAT_FLOAT] // 00000024: EBF71000 80010101
+  v_mov_b32     v0, s33                                     // 0000002C: 7E000201
+  s_waitcnt     expcnt(0)                                   // 00000030: BF8C1F0F
+  v_mov_b32     v1, s36                                     // 00000034: 7E02020C
+  v_mov_b32     v2, s37                                     // 00000038: 7E04020D
+  v_mov_b32     v3, s38                                     // 0000003C: 7E06020E
+  v_mov_b32     v4, s39                                     // 00000040: 7E08020F
+  tbuffer_store_format_xyzw  v[1:4], v0, s[4:7], 0 offen format:[BUF_DATA_FORMAT_32_32_32_32,BUF_NUM_FORMAT_FLOAT] // 00000044: EBF71000 80010100
+  v_mov_b32     v0, s34                                     // 0000004C: 7E000202
+  s_waitcnt     expcnt(0)                                   // 00000050: BF8C1F0F
+  v_mov_b32     v1, s40                                     // 00000054: 7E020210
+  v_mov_b32     v2, s41                                     // 00000058: 7E040211
+  v_mov_b32     v3, s42                                     // 0000005C: 7E060212
+  v_mov_b32     v4, s43                                     // 00000060: 7E080213
+  tbuffer_store_format_xyzw  v[1:4], v0, s[4:7], 0 offen format:[BUF_DATA_FORMAT_32_32_32_32,BUF_NUM_FORMAT_FLOAT] // 00000064: EBF71000 80010100
+  v_mov_b32     v0, s35                                     // 0000006C: 7E000203
+  s_waitcnt     expcnt(0)                                   // 00000070: BF8C1F0F
+  v_mov_b32     v1, s44                                     // 00000074: 7E020208
+  v_mov_b32     v2, s45                                     // 00000078: 7E040209
+  v_mov_b32     v3, s46                                     // 0000007C: 7E06020A
+  v_mov_b32     v4, s47                                     // 00000080: 7E08020B
+  tbuffer_store_format_xyzw  v[1:4], v0, s[4:7], 0 offen format:[BUF_DATA_FORMAT_32_32_32_32,BUF_NUM_FORMAT_FLOAT] // 00000084: EBF71000 80010100
+  s_endpgm
+);
+
+var kernel2:=asm_isa(
+  isa79xx
+  NumVgprs 3
+  NumSgprs 20
+  cb0size 2
+
+  s_buffer_load_dwordx16  s[0:1], s[12:15], 0x00
+
+  v_lshlrev_b32  v2, 6, v2                                  // 00000000: 34040486
+  v_lshlrev_b32  v1, 6, v1                                  // 00000004: 34020286
+  v_add_i32     v1, vcc, v2, v1                             // 00000008: 4A020302
+  v_add_i32     v0, vcc, v0, v1                             // 0000000C: 4A000300
+  s_mov_b32     m0, 0x00008000                              // 00000010: BEFC03FF 00008000
+  s_buffer_load_dwordx2  s[0:1], s[12:15], 0x00             // 00000018: C2400D00
+  s_waitcnt     lgkmcnt(0)                                  // 0000001C: BF8C007F
+  s_mul_i32     s2, s18, s0                                 // 00000020: 93020012
+  s_mul_i32     s1, s2, s1                                  // 00000024: 93010102
+  s_mul_i32     s0, s17, s0                                 // 00000028: 93000011
+  s_add_i32     s0, s1, s0                                  // 0000002C: 81000001
+  s_add_i32     s0, s16, s0                                 // 00000030: 81000010
+  s_lshl_b32    s0, s0, 6                                   // 00000034: 8F008600
+  v_add_i32     v0, vcc, s0, v0                             // 00000038: 4A000000
+  v_lshlrev_b32  v1, 2, v0                                  // 0000003C: 34020082
+  s_buffer_load_dword  s0, s[8:11], 0x04                    // 00000040: C2000904
+  s_buffer_load_dword  s1, s[8:11], 0x00                    // 00000044: C2008900
+  s_waitcnt     lgkmcnt(0)                                  // 00000048: BF8C007F
+  v_mul_i32_i24  v0, v0, s0                                 // 0000004C: D2120000 00000100
+  v_add_i32     v2, vcc, 1, v0                              // 00000054: 4A040081
+  s_cmp_eq_u32  s1, 0                                       // 00000058: BF068001
+;  s_cbranch_scc1  label_0022                                // 0000005C: BF85000A
+;  ds_min_rtn_i32  v0, v0, v2 offset:1                       // 00000060: D8940001 00000200
+  s_waitcnt     lgkmcnt(0)                                  // 00000068: BF8C007F
+  v_mov_b32     v2, v0                                      // 0000006C: 7E040300
+;  buffer_atomic_add  v2, v0, s[4:7], 0 offen glc            // 00000070: E0C85000 80010200
+  s_waitcnt     vmcnt(0)                                    // 00000078: BF8C1F70
+  v_sad_u32 v2,5,5,24
+  tbuffer_store_format_x  v2, v1, s[4:7], 0 offen format:[BUF_DATA_FORMAT_32,BUF_NUM_FORMAT_FLOAT] // 0000007C: EBA41000 80010201
+  s_branch      label_0022                                  // 00000084: BF820000
+label_0022:
+  s_endpgm                                                  // 00000088: BF810000
+);
+
+var kernel3:=asm_isa(
+  isa79xx
+  NumVgprs 3
+  NumSgprs 20
+  cb0size 2
+
+  dd $D0000000
+);*)
+
+{for var i:=0 to 511 do //Vsrc0 addressing
+  kernel3+=format('dd $%x'#13#10,$34040400+i);}
+{for var i:=0 to 255 do //Ssrc0 addressing   (ua, mint Vsrc0)
+  kernel3+=format('dd $%x'#13#10,$80000000+i<<8);}
+{for var i:=0 to 255 do //s_waitcnt params 7f:lgkmcnt(0)
+  kernel3+=format('dd $%x'#13#10,$BF8C0000+i<<0);}
+
+{for var i in[0..$5f,$7f]do //SOP2
+  kernel3+=format('dd $%x'#13#10,$80000000+i<<23);}
+{for var i in[0..$1F]do //SOPK
+  kernel3+=format('dd $%x'#13#10,$B0000000+i<<23);}
+{for var i in[0..$FF]do //SOP1
+  kernel3+=format('dd $%x'#13#10,$BE800000+i<<8);}
+{for var i in[0..$7F]do //SOPC
+  kernel3+=format('dd $%x'#13#10,$BF000000+i<<16);}
+{for var i in[0..$7F]do //SOPP flowctrl
+  kernel3+=format('dd $%x'#13#10,$BF800000+i<<16);}
+{for var i in[0..$1F]do //SMRD mem read
+  kernel3+=format('dd $%x'#13#10,$C0000000+i<<22);}
+
+{for var i:=1 to 61 do //VOP2 opcodes
+  kernel3+=format('dd $%x'&(i in[$20,$21]?', 0':'')&#13#10,i<<(32-7));}
+{for var i:=0 towards 255 do //VOP1 opcodes
+  kernel3+=format('dd $%x'#13#10,$7E000000+i<<9);}
+{for var i:=0 towards 255 do //VOPC opcodes
+  kernel3+=format('dd $%x'#13#10,$7C000000+i<<17);}
+{for var i in[0..$100,$103..$11F,$122..$181,$183..$1FF] do //VOP3 opcodes, a halmazon kivuli elemek accessviolaznak a cal.dll-ben
+  kernel3+=format('dd $%x, 0'#13#10,$D0000000+i<<17);}
+{for var i in[0..3] do //VINTRP opcodes
+  kernel3+=format('dd $%x'#13#10,$C8000000+i<<16);}
+{for var i in[0..255] do //LDS
+  kernel3+=format('dd $%x,$200'#13#10,$D8000000+i<<18);}
+{for var i in[0..255] do //GDS
+  kernel3+=format('dd $%x,$200'#13#10,$D8020000+i<<18);}
+{for var i in[0] do //export
+  kernel3+=format('dd $%x,$0'#13#10,$F8000000);}
+{for var i in[0..127] do //MUBUF
+  kernel3+=format('dd $%x,$0'#13#10,$E0000000+i<<19);}
+{for var i in[0..7] do //MTBUF
+  kernel3+=format('dd $%x,$0'#13#10,$E8000000+i<<16);}
+{for var i in[0..127] do //MIMG
+  kernel3+=format('dd $%x,$0'#13#10,$F0000000+i<<19);}
+
+{for var i:=0 to 512 step 1 do //S_buffer imm8
+  kernel3+=format('dd $%x'#13#10,$C2400C00+i);}
+{for var i:=0 to 512 step 1 do //lgkmcnt
+  kernel3+=format('dd $%x'#13#10,$BF8C0000+i);}
+
+{for var i:=0 to 255 step 1 do
+  kernel3+=format('dd $%x,$%x'#13#10,$EBA41000 and not($7f<<19)+15<<19+7<<23 ,$00010001+i<<24 );}
+
+var dev:=cal.devices[0];
+dev.activate;
+writeln(dev.dump);
+
+var module:=dev.Context.NewModule(kernel);
+writeln(module.disasm);
+
+var rCB0:=dev.NewResource(rlPinned,4,64,0);
+module['cb0']:=rCB0;
+rCB0.IntVArray:=(0,16,32,48,4,5,6,7,8,9,10,11,12,13,14,15,16);
+
+var rGlobal:=dev.NewResource(rlPinned,1,4*12500,0);
+module['uav0']:=rGlobal;
+rGlobal.IntVArray:=(0);
+
+with Module.RunGrid({int(1e8)}1,1,0) do begin
+  if Success then for var i:=0 to 255 do writeln(format('%.8x',rGlobal.Ints[i]),' ')
+             else writeLn('FAIL');
+
+  writeln('elapsed:',ElapsedTime_sec);
+  Free;
+end;

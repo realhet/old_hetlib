@@ -1,0 +1,110 @@
+#include stdgcn.inc
+
+#define WorkGroupSize 256
+
+#define hiBits 10
+
+#define WorkItems 1<<(hiBits*2)
+
+var skeleton:='__kernel __attribute__((reqd_work_group_size('&WorkGroupSize&',1,1))) void main(__global uint* a) { a[get_global_id(0)*1]=999; }';
+
+var code:=asm_isa(
+  isa79xx   numsgprs 40   numvgprs 64
+  s_buffer_load_dword  s0, s[ 8:11], 0x60 ofsByte       // 000000000000: C0220004 00000060
+  s_buffer_load_dword  s1, s[12:15], 0x00 ofsByte       // 000000000008: C0220046 00000000
+  s_lshl_b32    s2, s16, 8                              // 000000000010: 8E028810
+  s_waitcnt     lgkmcnt(0)                              // 000000000014: BF8C007F
+  s_add_u32     s0, s2, s0                              // 000000000018: 80000002
+  v_add_u32     v1, vcc, s0, v0                         // 00000000001C: 32000000
+  v_lshlrev_b32  v0, 2, v1                              // 000000000020: 24000082
+  v_add_u32     v0, vcc, s1, v0                         // 000000000024: 32000001
+  alias UAV=s[4:7], dstAddr=v0, gid=v1
+
+  buffer_store_dword  gid, dstAddr, uav, 0 offen           // 000000000030: E0701000 80010100
+  v_temp_range 2..63
+  s_temp_range 8..39
+
+  //count 16x16 pixels of pi
+  v_temp xbase, ybase, cnt
+  v_bfe_u32 xbase, gid,      0, hiBits   v_lshlrev_b32 xbase, 8, xbase
+  v_bfe_u32 ybase, gid, hiBits, hiBits   v_lshlrev_b32 ybase, 8, ybase
+
+  //full 1?
+  v_temp alo, ahi, blo, bhi
+  enter
+    v_temp xx, xxlo, xxhi  v_mov_b32 xx, 0
+    v_add_u32 xx, vcc, xbase, xx
+    v_mul_u32_u24 xxlo, xx, xx
+    v_mul_hi_u32_u24 xxhi, xx, xx
+    v_temp yy, yylo, yyhi, hi v_mov_b32 yy, 0
+    v_add_u32 yy, vcc, ybase, yy
+    v_mul_u32_u24 yylo, yy, yy
+    v_mul_hi_u32_u24 yyhi, yy, yy
+
+    v_add_u32 alo, vcc, yylo, xxlo
+    v_addc_u32 ahi, vcc, yyhi, xxhi, vcc
+  leave
+
+//  v_if_u32(ahi>=1<<((hibits-8)*2)) //full 1?
+    v_mov_b32 cnt, 0
+//  _else
+    v_mov_b32 cnt, 0
+    s_temp x  s_movk_i32 x, 0
+    s_while_u32(x<256)
+      v_temp xx, xxlo, xxhi  v_mov_b32 xx, x
+      v_add_u32 xx, vcc, xbase, xx
+      v_mul_u32_u24 xxlo, xx, xx
+      v_mul_hi_u32_u24 xxhi, xx, xx
+
+      s_temp y  s_movk_i32 y, 0
+      s_while_u32(y<256)
+        v_temp yy, yylo, yyhi, hi v_mov_b32 yy, y
+        v_add_u32 yy, vcc, ybase, yy
+        v_mul_u32_u24 yylo, yy, yy
+        v_mul_hi_u32_u24 yyhi, yy, yy
+
+        v_add_u32 yylo, vcc, yylo, xxlo
+        v_addc_u32 yyhi, vcc, yyhi, xxhi, vcc
+
+        v_if_u32(yyhi<1<<((hibits-8)*2))
+          v_add_u32 cnt, vcc, 1, cnt
+        _endif
+        s_addk_i32 y, 1
+      _endw
+      s_addk_i32 x, 1
+    _endw
+//  _endif
+
+
+  buffer_store_dword  cnt, dstAddr, uav, 0 offen           // 000000000030: E0701000 80010100
+
+  s_endpgm
+);
+
+
+
+var dev:=cl.devices[0];
+writeln(dev.dump);
+
+//var kernel:=dev.newKernel(skeleton);
+var kernel:=dev.newKernel(code, skeleton);
+//writeln(kernel.ISACode);
+
+//if dev.info.targetSeries=9 then exit;
+
+var buf:=dev.NewBuffer('rw',4*workitems{bytes}); buf.clear;
+var ev:=kernel.run(workitems,buf);
+ev.waitfor;
+writeln('elapsed: '&format('%.3f',ev.elapsedtime_sec*1000)&' ms');
+ev.free;
+
+//display results
+
+with buf do for var i:=0 to workitems-1 do begin
+  writeln(format('%6x: %.8x %10d %10f',i,Ints[i],Ints[i],Floats[i]));
+end;
+
+var sum:=0.0;
+for var i:=0 to 1<<(hiBits*2)-1 do sum +=buf.ints[i];
+
+writeln(sum*power(2, -2*(hiBits+8)+2));

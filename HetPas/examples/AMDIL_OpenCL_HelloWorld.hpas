@@ -1,0 +1,52 @@
+//find a cl device
+var dev:=cl.devices[0];
+writeln(dev.dump);
+
+const code:=asm_il(il_cs_2_0
+dcl_num_thread_per_group 256,1,1
+dcl_raw_uav_id(0)   //uav translation if id=0 : 5xxx, 6xxx: -> 11, 7xxx -> 10
+dcl_arena_uav_id(8) //This is needed on XP, but not work on 4xxx!!!!!
+dcl_cb cb0[15] ; Constant buffer that holds ABI data, must declare on 4xxx
+dcl_cb cb1[2]  //cb1[0].x : uav offset
+dcl_cb cb2[20] //actual cb
+dcl_lds_id(0) 8192
+  ishl r65.x, vAbsTid.x0, 2
+  iadd r65.x, cb1[0].x, r65.x  //add uav offset
+
+  uav_raw_load_id(0)_cached r0.x, r65.x       //load   //4xxx needs _cached hint
+  iadd r66.x,cb2[0].x,r0.x
+
+  uav_raw_store_id(0) mem.x___, r65.x, r66.x  //mask,addr,data
+end);
+
+//compile kernel
+var kernel:=dev.NewKernel(code{FileRead('c:\test_il.elf')});
+writeln(kernel.ILCode);  //show disasm
+writeln(kernel.ISACode);  //show disasm
+kernel.dump('c:\!ocl_il\');
+filewrite('c:\test.elf',kernel.ELFImage); //save opencl .elf file, you can give it to NewKernel() later
+
+const WorkCount:=256;
+
+//allocate buffer
+var uav:=dev.NewBuffer('rw',WorkCount*4{in bytes});
+uav.clear;
+uav.ints[1]:=1000000;
+
+var cb:=dev.NewBuffer('r',4096{in bytes});
+cb.intVArray:=(1234);
+
+//run kernel
+var ev:=kernel.run(WorkCount,uav,cb);
+ev.waitfor;
+writeln('elapsed: '&format('%.3f',ev.elapsedtime_sec*1000)&' ms');
+ev.free;
+
+//display results
+with uav do for var i:=0 to WorkCount-1 do
+  writeln(format('%6x: %.8x %10d %10f',i,Ints[i],Ints[i],Floats[i]));
+
+//free up stuff
+cb.free;
+uav.free;
+kernel.free;
